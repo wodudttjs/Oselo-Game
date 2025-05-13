@@ -1,11 +1,10 @@
-import sys
 import tkinter as tk
 from tkinter import messagebox
 import copy
 
 EMPTY, BLACK, WHITE = '.', 'B', 'W'
 
-# 평가용 가중치 배열
+# 평가 가중치 (중앙 약함, 모서리 강함)
 WEIGHTS = [
     [100, -20, 10,  5,  5, 10, -20, 100],
     [-20, -50, -2, -2, -2, -2, -50, -20],
@@ -16,7 +15,7 @@ WEIGHTS = [
     [-20, -50, -2, -2, -2, -2, -50, -20],
     [100, -20, 10,  5,  5, 10, -20, 100],
 ]
-CORNERS = [(0,0), (0,7), (7,0), (7,7)]
+CORNERS = [(0, 0), (0, 7), (7, 0), (7, 7)]
 
 def opponent(color):
     return BLACK if color == WHITE else WHITE
@@ -34,16 +33,18 @@ class Board:
         return 0 <= x < self.size and 0 <= y < self.size
 
     def get_valid_moves(self, color):
-        valid_moves = []
+        moves = []
         for x in range(self.size):
             for y in range(self.size):
-                if self.board[x][y] != EMPTY:
+                if self.board[x][y] != EMPTY and self.board[x][y] != opponent(color):
                     continue
                 if self.is_valid_move(x, y, color):
-                    valid_moves.append((x, y))
-        return valid_moves
+                    moves.append((x, y))
+        return moves
 
     def is_valid_move(self, x, y, color):
+        if self.board[x][y] != EMPTY:
+            return False
         for dx, dy in [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]:
             nx, ny = x + dx, y + dy
             found_opponent = False
@@ -167,19 +168,35 @@ class OthelloGUI:
         if (y, x) in self.board.get_valid_moves(self.current_player):
             self.board = self.board.apply_move(y, x, self.current_player)
             self.update_gui()
-            self.root.after(500, self.ai_move)
+            if not self.board.get_valid_moves(self.ai.color) and not self.board.get_valid_moves(self.current_player):
+                self.check_game_end()
+                return
+            if self.board.get_valid_moves(self.ai.color):
+                self.root.after(500, self.ai_move)
+            else:
+                messagebox.showinfo("Turn Skipped", "AI has no valid move. Your turn again.")
 
     def ai_move(self):
-        move = self.ai.get_move(self.board)
-        if move:
-            self.board = self.board.apply_move(*move, self.ai.color)
-        self.update_gui()
-        if not self.board.get_valid_moves(self.current_player) and not self.board.get_valid_moves(self.ai.color):
-            b, w = self.board.count_stones()
-            msg = f"Game Over!\nBlack: {b} | White: {w}\n"
-            msg += "You win!" if b > w else "AI wins!" if w > b else "It's a draw!"
-            tk.messagebox.showinfo("Result", msg)
-            self.root.destroy()
+        if self.board.get_valid_moves(self.ai.color):
+            move = self.ai.get_move(self.board)
+            if move:
+                self.board = self.board.apply_move(*move, self.ai.color)
+                self.update_gui()
+
+        if not self.board.get_valid_moves(self.ai.color) and not self.board.get_valid_moves(self.current_player):
+            self.check_game_end()
+            return
+
+        if not self.board.get_valid_moves(self.current_player):
+            messagebox.showinfo("Turn Skipped", "You have no valid move. AI plays again.")
+            self.root.after(500, self.ai_move)
+
+    def check_game_end(self):
+        b, w = self.board.count_stones()
+        msg = f"Game Over!\nBlack: {b} | White: {w}\n"
+        msg += "You Win!" if b > w else "AI Wins!" if w > b else "Draw!"
+        messagebox.showinfo("Result", msg)
+        self.root.destroy()
 
     def update_gui(self):
         self.canvas.delete("all")
@@ -197,33 +214,6 @@ class OthelloGUI:
 
         b, w = self.board.count_stones()
         self.status_label.config(text=f"Black: {b} | White: {w}")
-
-
-    def player_move(self, x, y):
-        if (x, y) in self.board.get_valid_moves(self.current_player):
-            self.board = self.board.apply_move(x, y, self.current_player)
-            self.update_gui()
-            self.root.after(500, self.ai_move)
-        else:
-            messagebox.showinfo("Invalid", "Not a valid move!")
-
-    def ai_move(self):
-        move = self.ai.get_move(self.board)
-        if move:
-            self.board = self.board.apply_move(*move, self.ai.color)
-        self.update_gui()
-        if not self.board.get_valid_moves(self.current_player) and not self.board.get_valid_moves(self.ai.color):
-            b, w = self.board.count_stones()
-            msg = "Game Over!\n"
-            msg += f"Final Score - Black: {b}, White: {w}\n"
-            if b > w:
-                msg += "You Win!"
-            elif w > b:
-                msg += "AI Wins!"
-            else:
-                msg += "Draw!"
-            messagebox.showinfo("Result", msg)
-            self.root.destroy()
 
 # 실행
 if __name__ == "__main__":
