@@ -1,6 +1,9 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, simpledialog
 import copy
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 
 EMPTY, BLACK, WHITE = '.', 'B', 'W'
 
@@ -19,6 +22,12 @@ CORNERS = [(0, 0), (0, 7), (7, 0), (7, 7)]
 
 def opponent(color):
     return BLACK if color == WHITE else WHITE
+
+def evaluate_move(move, board, color, depth):
+    ai = AlphaBetaAI(color, depth)
+    new_board = board.apply_move(*move, color)
+    score = ai.alphabeta(new_board, depth - 1, float('-inf'), float('inf'), False)[0]
+    return score, move
 
 class Board:
     def __init__(self):
@@ -79,7 +88,8 @@ class Board:
 class AlphaBetaAI:
     def __init__(self, color, depth=3):
         self.color = color
-        self.depth = depth
+        self.default_depth = depth
+        self.max_workers = multiprocessing.cpu_count()
 
     def evaluate(self, board_obj):
         board = board_obj.board
@@ -107,6 +117,15 @@ class AlphaBetaAI:
             return 25 * (my - opp)
 
         return positional_score() + mobility_score() + corner_score()
+
+    def get_dynamic_depth(self, board):
+        total_stones = sum(row.count(BLACK) + row.count(WHITE) for row in board.board)
+        if total_stones < 20:
+            return 2
+        elif total_stones < 50:
+            return 4
+        else:
+            return 6
 
     def alphabeta(self, board, depth, alpha, beta, maximizing):
         current_color = self.color if maximizing else opponent(self.color)
@@ -142,8 +161,19 @@ class AlphaBetaAI:
             return value, best_move
 
     def get_move(self, board):
-        _, move = self.alphabeta(board, self.depth, float('-inf'), float('inf'), True)
-        return move
+        dynamic_depth = self.get_dynamic_depth(board)
+        moves = board.get_valid_moves(self.color)
+        if not moves:
+            return None
+
+        evaluate_fn = partial(evaluate_move, board=board, color=self.color, depth=dynamic_depth)
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor:
+            results = list(executor.map(evaluate_fn, moves))
+        results.sort(reverse=True)
+        return results[0][1] if results else None
+
+# 이하 GUI 클래스와 실행 부분 동일
+
 
 class OthelloGUI:
     def __init__(self, root):
@@ -151,16 +181,26 @@ class OthelloGUI:
         self.root.title("Othello (Tkinter)")
         self.cell_size = 60
         self.board = Board()
-        self.ai = AlphaBetaAI(WHITE)
-        self.current_player = BLACK
+
+        # 사용자에게 흑/백 선택받기
+        player_choice = simpledialog.askstring("Player Color", "Do you want to play first? (yes/no)").lower()
+        if player_choice in ['yes', 'y']:
+            self.current_player = BLACK
+            self.ai = AlphaBetaAI(WHITE)
+        else:
+            self.current_player = WHITE
+            self.ai = AlphaBetaAI(BLACK)
 
         self.canvas = tk.Canvas(self.root, width=self.cell_size*8, height=self.cell_size*8, bg="dark green")
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self.handle_click)
 
-        self.status_label = tk.Label(self.root, text="Your turn (Black)", font=("Arial", 14))
+        self.status_label = tk.Label(self.root, text="Game Start", font=("Arial", 14))
         self.status_label.pack()
         self.update_gui()
+
+        if self.current_player == WHITE:
+            self.root.after(500, self.ai_move)
 
     def handle_click(self, event):
         x = event.x // self.cell_size
