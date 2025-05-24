@@ -83,7 +83,7 @@ class Board:
         # Corners are always stable
         if (x, y) in CORNERS:
             return True
-            
+        
         # Check stability in all directions
         directions = [
             [(0, 1), (0, -1)],   # horizontal
@@ -138,3 +138,69 @@ class Board:
     def get_hash(self):
         """Get a hash representation of the board state"""
         return hash(tuple(tuple(row) for row in self.board))
+    # Board 클래스에 추가할 최적화된 apply_move 메서드
+def apply_move_fast(self, x, y, color):
+    """최적화된 move 적용 (깊은 복사 대신 얕은 복사 + 수동 복원)"""
+    # 원본 보드 상태 저장
+    original_state = []
+    
+    # 돌 놓기
+    original_state.append((x, y, self.board[x][y]))
+    self.board[x][y] = color
+    
+    flipped = []
+    directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+    
+    for dx, dy in directions:
+        nx, ny = x + dx, y + dy
+        to_flip = []
+        
+        while self.in_bounds(nx, ny) and self.board[nx][ny] == opponent(color):
+            to_flip.append((nx, ny))
+            nx += dx
+            ny += dy
+            
+        if self.in_bounds(nx, ny) and self.board[nx][ny] == color and to_flip:
+            for fx, fy in to_flip:
+                original_state.append((fx, fy, self.board[fx][fy]))
+                self.board[fx][fy] = color
+            flipped.extend(to_flip)
+    
+    return original_state, flipped
+
+def undo_move(self, original_state):
+    """move 되돌리기"""
+    for x, y, original_color in original_state:
+        self.board[x][y] = original_color
+
+# 캐시를 활용한 valid_moves
+def __init__(self):
+    # ... 기존 초기화 코드 ...
+    self._valid_moves_cache = {}
+    self._board_hash_cache = None
+
+def get_valid_moves_cached(self, color):
+    """캐시된 valid moves"""
+    board_hash = self.get_hash()
+    cache_key = (board_hash, color)
+    
+    if cache_key not in self._valid_moves_cache:
+        moves = []
+        for x in range(self.size):
+            for y in range(self.size):
+                if self.board[x][y] == EMPTY and self.is_valid_move(x, y, color):
+                    moves.append((x, y))
+        self._valid_moves_cache[cache_key] = moves
+    
+    return self._valid_moves_cache[cache_key]
+
+def get_hash_cached(self):
+    """캐시된 해시"""
+    if self._board_hash_cache is None:
+        self._board_hash_cache = hash(tuple(tuple(row) for row in self.board))
+    return self._board_hash_cache
+
+def _invalidate_cache(self):
+    """캐시 무효화 (보드 상태 변경시 호출)"""
+    self._valid_moves_cache.clear()
+    self._board_hash_cache = None
