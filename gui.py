@@ -9,9 +9,10 @@ class OthelloGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Advanced Othello AI")
-        self.root.geometry("600x700")
+        self.root.geometry("700x750")
         
         self.cell_size = 60
+        self.margin = 40  # 좌표 표시를 위한 여백
         self.board = Board()
         self.game_over = False
         self.ai_thinking = False
@@ -56,9 +57,10 @@ class OthelloGUI:
                                        values=["easy", "medium", "hard"], width=8)
         difficulty_combo.pack(side=tk.LEFT, padx=5)
         
-        # Canvas for the board
-        self.canvas = tk.Canvas(self.root, width=self.cell_size * 8, height=self.cell_size * 8,
-                               bg="dark green", highlightthickness=2)
+        # Canvas for the board (좌표 표시를 위해 크기 증가)
+        canvas_size = self.cell_size * 8 + self.margin * 2
+        self.canvas = tk.Canvas(self.root, width=canvas_size, height=canvas_size,
+                               bg="#2E8B57", highlightthickness=2)  # 오델로 보드 색상
         self.canvas.pack(pady=10)
         self.canvas.bind("<Button-1>", self.handle_click)
         self.canvas.bind("<Motion>", self.handle_hover)
@@ -110,29 +112,68 @@ class OthelloGUI:
             self.root.after(500, self.ai_move)
 
     def draw_board(self):
-        """Draw the game board"""
+        """Draw the game board with coordinates"""
         self.canvas.delete("all")
         
-        # Draw grid
+        # Board area background (흰색 둥근 모서리 사각형)
+        board_start = self.margin
+        board_end = self.margin + 8 * self.cell_size
+        
+        # 배경 사각형 (둥근 모서리 효과)
+        self.canvas.create_rectangle(board_start - 5, board_start - 5, 
+                                   board_end + 5, board_end + 5,
+                                   fill="darkgreen", outline="#888", width=2)
+        
+        # Draw grid lines
         for i in range(9):
             # Vertical lines
-            self.canvas.create_line(i * self.cell_size, 0, i * self.cell_size, 8 * self.cell_size,
-                                  fill="black", width=2)
+            x = board_start + i * self.cell_size
+            self.canvas.create_line(x, board_start, x, board_end,
+                                  fill="black", width=1)
             # Horizontal lines
-            self.canvas.create_line(0, i * self.cell_size, 8 * self.cell_size, i * self.cell_size,
-                                  fill="black", width=2)
+            y = board_start + i * self.cell_size
+            self.canvas.create_line(board_start, y, board_end, y,
+                                  fill="black", width=1)
+        
+        # Draw coordinate labels
+        # Column labels (a-h)
+        for i in range(8):
+            x = board_start + i * self.cell_size + self.cell_size // 2
+            # Top labels
+            self.canvas.create_text(x, board_start - 20, text=chr(ord('a') + i),
+                                  font=("Arial", 14, "bold"), fill="white")
+            # Bottom labels
+            self.canvas.create_text(x, board_end + 20, text=chr(ord('a') + i),
+                                  font=("Arial", 14, "bold"), fill="white")
+        
+        # Row labels (1-8)
+        for i in range(8):
+            y = board_start + i * self.cell_size + self.cell_size // 2
+            # Left labels
+            self.canvas.create_text(board_start - 20, y, text=str(i + 1),
+                                  font=("Arial", 14, "bold"), fill="white")
+            # Right labels
+            self.canvas.create_text(board_end + 20, y, text=str(i + 1),
+                                  font=("Arial", 14, "bold"), fill="white")
+        
+        # Draw guide dots at grid intersections (격자선 교차점에 점 배치)
+        # 이미지처럼 2-3행 사이, b-c열 사이 등의 격자선 교차점에 점을 배치
+        guide_dots = [
+            (2, 2), (2, 6),  # 2-3행 사이의 b-c, f-g 교차점
+            (6, 2), (6, 6)   # 6-7행 사이의 b-c, f-g 교차점
+        ]
+        for dot_row, dot_col in guide_dots:
+            # 격자선 교차점 좌표 계산 (셀 중앙이 아닌 격자선 위)
+            x = board_start + dot_col * self.cell_size
+            y = board_start + dot_row * self.cell_size
+            self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, 
+                                  fill="black", outline="black")
         
         # Draw stones
-        for i in range(8):
-            for j in range(8):
-                x1, y1 = j * self.cell_size + 5, i * self.cell_size + 5
-                x2, y2 = x1 + self.cell_size - 10, y1 + self.cell_size - 10
-                
-                stone = self.board.board[i][j]
-                if stone == BLACK:
-                    self.canvas.create_oval(x1, y1, x2, y2, fill="black", outline="gray", width=2)
-                elif stone == WHITE:
-                    self.canvas.create_oval(x1, y1, x2, y2, fill="white", outline="gray", width=2)
+        for row in range(8):
+            for col in range(8):
+                if self.board.board[row][col] != EMPTY:
+                    self.draw_stone(row, col, self.board.board[row][col])
         
         # 마지막 수 표시
         if self.last_move:
@@ -142,42 +183,106 @@ class OthelloGUI:
         if self.current_player == self.human_color and not self.game_over and not self.ai_thinking:
             valid_moves = self.board.get_valid_moves(self.human_color)
             for move in valid_moves:
-                x, y = move
-                cx = y * self.cell_size + self.cell_size // 2
-                cy = x * self.cell_size + self.cell_size // 2
-                self.canvas.create_oval(cx - 8, cy - 8, cx + 8, cy + 8,
-                                      fill="yellow", outline="orange", width=2)
+                row, col = move
+                self.draw_valid_move_hint(row, col)
+
+    def draw_stone(self, row, col, color):
+        """Draw a stone on the board"""
+        x = self.margin + col * self.cell_size + self.cell_size // 2
+        y = self.margin + row * self.cell_size + self.cell_size // 2
+        radius = self.cell_size // 2 - 5
+        
+        # Shadow effect
+        shadow_offset = 2
+        self.canvas.create_oval(x - radius + shadow_offset, 
+                               y - radius + shadow_offset,
+                               x + radius + shadow_offset, 
+                               y + radius + shadow_offset,
+                               fill="#888888", outline="")
+        
+        # Main stone
+        if color == BLACK:
+            self.canvas.create_oval(x - radius, y - radius,
+                                  x + radius, y + radius,
+                                  fill="#2C2C2C", outline="#1C1C1C", width=2)
+            # Highlight
+            self.canvas.create_oval(x - radius + 5, y - radius + 5,
+                                  x - radius + 12, y - radius + 12,
+                                  fill="#5C5C5C", outline="")
+        else:  # WHITE
+            self.canvas.create_oval(x - radius, y - radius,
+                                  x + radius, y + radius,
+                                  fill="#F5F5F5", outline="#CCCCCC", width=2)
+            # Highlight
+            self.canvas.create_oval(x - radius + 5, y - radius + 5,
+                                  x - radius + 12, y - radius + 12,
+                                  fill="white", outline="")
+
+    def draw_valid_move_hint(self, row, col):
+        """Draw hint for valid moves"""
+        x = self.margin + col * self.cell_size + self.cell_size // 2
+        y = self.margin + row * self.cell_size + self.cell_size // 2
+        radius = 8
+        
+        # Semi-transparent circle for hint
+        self.canvas.create_oval(x - radius, y - radius,
+                              x + radius, y + radius,
+                              fill="#FFD700", outline="#FFA500", width=2,
+                              stipple="gray25")
 
     def draw_last_move_indicator(self):
         """마지막 수에 플레이어 표시를 그리는 메서드"""
         if not self.last_move:
             return
             
-        x, y, player_type = self.last_move
-        cx = y * self.cell_size + self.cell_size // 2
-        cy = x * self.cell_size + self.cell_size // 2
+        row, col, player_type = self.last_move
+        x = self.margin + col * self.cell_size + self.cell_size // 2
+        y = self.margin + row * self.cell_size + self.cell_size // 2
         
-        # 플레이어 타입에 따른 텍스트와 색상 설정
+        # 플레이어 타입에 따른 색상 설정
         text = player_type
-        # 돌의 색상에 따라 텍스트 색상 결정 (가독성을 위해)
-        text_color = "white" if self.board.board[x][y] == BLACK else "black"
+        if self.board.board[row][col] == BLACK:
+            text_color = "white"
+            bg_color = "#FF4444" if player_type == "HU" else "#4444FF"
+        else:
+            text_color = "black"
+            bg_color = "#FF4444" if player_type == "HU" else "#4444FF"
+        
+        # 배경 원 그리기
+        self.canvas.create_oval(x - 12, y - 8, x + 12, y + 8,
+                               fill=bg_color, outline="", stipple="gray50")
         
         # 텍스트 그리기
-        self.canvas.create_text(
-            cx, cy, 
-            text=text, 
-            fill=text_color, 
-            font=("Arial", 8, "bold")
-        )
+        self.canvas.create_text(x, y, text=text, fill=text_color, 
+                               font=("Arial", 8, "bold"))
+
+    def get_board_coordinates(self, event_x, event_y):
+        """Convert canvas coordinates to board coordinates"""
+        board_x = event_x - self.margin
+        board_y = event_y - self.margin
+        
+        if board_x < 0 or board_y < 0:
+            return None, None
+        
+        col = board_x // self.cell_size
+        row = board_y // self.cell_size
+        
+        if 0 <= row < 8 and 0 <= col < 8:
+            return row, col
+        return None, None
 
     def handle_hover(self, event):
         """Handle mouse hover to show preview"""
         if self.current_player != self.human_color or self.game_over or self.ai_thinking:
             return
             
-        col, row = event.x // self.cell_size, event.y // self.cell_size
-        if 0 <= row < 8 and 0 <= col < 8 and self.board.is_valid_move(row, col, self.human_color):
-            self.canvas.configure(cursor="hand2")
+        row, col = self.get_board_coordinates(event.x, event.y)
+        
+        if row is not None and col is not None:
+            if self.board.is_valid_move(row, col, self.human_color):
+                self.canvas.configure(cursor="hand2")
+            else:
+                self.canvas.configure(cursor="")
         else:
             self.canvas.configure(cursor="")
 
@@ -186,10 +291,11 @@ class OthelloGUI:
         if self.current_player != self.human_color or self.game_over or self.ai_thinking:
             return
             
-        col, row = event.x // self.cell_size, event.y // self.cell_size
+        row, col = self.get_board_coordinates(event.x, event.y)
         
-        if 0 <= row < 8 and 0 <= col < 8 and self.board.is_valid_move(row, col, self.human_color):
-            self.make_move(row, col, self.human_color)
+        if row is not None and col is not None:
+            if self.board.is_valid_move(row, col, self.human_color):
+                self.make_move(row, col, self.human_color)
 
     def make_move(self, x, y, color):
         """Make a move and update the game state"""
