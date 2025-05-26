@@ -16,6 +16,9 @@ class OthelloGUI:
         self.game_over = False
         self.ai_thinking = False
         
+        # 마지막 수 추적을 위한 변수 추가
+        self.last_move = None  # (x, y, player_type) 형태로 저장
+        
         # Setup UI
         self.setup_ui()
         
@@ -82,6 +85,9 @@ class OthelloGUI:
         self.game_over = False
         self.ai_thinking = False
         
+        # 마지막 수 정보 초기화
+        self.last_move = None
+        
         # Ask for player preferences
         color_choice = messagebox.askyesno("Color Selection", 
                                          "Do you want to play as Black (go first)?")
@@ -128,6 +134,10 @@ class OthelloGUI:
                 elif stone == WHITE:
                     self.canvas.create_oval(x1, y1, x2, y2, fill="white", outline="gray", width=2)
         
+        # 마지막 수 표시
+        if self.last_move:
+            self.draw_last_move_indicator()
+        
         # Highlight valid moves for human player
         if self.current_player == self.human_color and not self.game_over and not self.ai_thinking:
             valid_moves = self.board.get_valid_moves(self.human_color)
@@ -137,6 +147,28 @@ class OthelloGUI:
                 cy = x * self.cell_size + self.cell_size // 2
                 self.canvas.create_oval(cx - 8, cy - 8, cx + 8, cy + 8,
                                       fill="yellow", outline="orange", width=2)
+
+    def draw_last_move_indicator(self):
+        """마지막 수에 플레이어 표시를 그리는 메서드"""
+        if not self.last_move:
+            return
+            
+        x, y, player_type = self.last_move
+        cx = y * self.cell_size + self.cell_size // 2
+        cy = x * self.cell_size + self.cell_size // 2
+        
+        # 플레이어 타입에 따른 텍스트와 색상 설정
+        text = player_type
+        # 돌의 색상에 따라 텍스트 색상 결정 (가독성을 위해)
+        text_color = "white" if self.board.board[x][y] == BLACK else "black"
+        
+        # 텍스트 그리기
+        self.canvas.create_text(
+            cx, cy, 
+            text=text, 
+            fill=text_color, 
+            font=("Arial", 8, "bold")
+        )
 
     def handle_hover(self, event):
         """Handle mouse hover to show preview"""
@@ -162,6 +194,10 @@ class OthelloGUI:
     def make_move(self, x, y, color):
         """Make a move and update the game state"""
         self.board = self.board.apply_move(x, y, color)
+        
+        # 마지막 수 정보 업데이트 (인간 플레이어)
+        self.last_move = (x, y, "HU")
+        
         self.current_player = opponent(self.current_player)
         self.update_display()
         if not self.game_over and self.current_player != self.human_color:
@@ -223,6 +259,10 @@ class OthelloGUI:
                     if move and not self.game_over:
                         x, y = move
                         self.board = self.board.apply_move(x, y, self.ai.color)
+                        
+                        # 마지막 수 정보 업데이트 (AI)
+                        self.last_move = (x, y, "AI")
+                        
                         self.current_player = opponent(self.current_player)
                     
                     self.update_display()
