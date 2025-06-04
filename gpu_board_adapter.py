@@ -6,9 +6,41 @@ GPU Board Adapter
 import logging
 import numpy as np
 from typing import List, Tuple, Optional
+import os
+
+def setup_gpu_adapter_logger():
+    """GPU Board Adapter 전용 로거 설정 - 파일에만 저장"""
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    logger = logging.getLogger('GPUBoardAdapter')
+    logger.setLevel(logging.INFO)
+    
+    # 기존 핸들러 제거
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # 파일 핸들러만 추가
+    file_handler = logging.FileHandler(
+        os.path.join(log_dir, 'gpu_board_adapter.log'),
+        mode='a',
+        encoding='utf-8'
+    )
+    
+    # 원하는 형태의 포맷터 설정
+    formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+    )
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    
+    # 상위 로거로 전파 방지 (콘솔 출력 차단)
+    logger.propagate = False
+    
+    return logger
 
 # 로거 설정
-logger = logging.getLogger('GPUBoardAdapter')
+logger = setup_gpu_adapter_logger()
 
 class BoardAdapter:
     """
@@ -321,6 +353,24 @@ class AIAdapter:
             difficulty: 난이도
             time_limit: 시간 제한
         """
+
+        # 기본적으로 신경망 AI 사용
+        if ai_type == 'auto':
+            ai_type = 'neural'  # 항상 신경망 우선
+            
+        # 신경망 AI 강제 사용
+        from gpu_ultra_strong_ai import UltraStrongAI
+        self.ai_instance = UltraStrongAI(
+            color, 
+            difficulty, 
+            time_limit,
+            use_neural_net=True  # 항상 신경망 사용
+        )
+        
+        # 연속 학습 활성화
+        if hasattr(self.ai_instance, 'continuous_learning'):
+            self.ai_instance.continuous_learning = True
+
         self.color = color
         self.ai_type = ai_type
         self.difficulty = difficulty
@@ -336,6 +386,7 @@ class AIAdapter:
         """AI 인스턴스 초기화"""
         if self.ai_type == 'auto':
             # 자동 선택: GPU 사용 가능하면 GPU, 아니면 CPU
+
             try:
                 from gpu_ultra_strong_ai import UltraStrongAI, GPUManager
                 gpu_manager = GPUManager()
@@ -371,7 +422,7 @@ class AIAdapter:
             ai_classes = [
                 ('ai', 'AdvancedAI'),
                 ('egaroucid_ai', 'EgaroucidStyleAI'),
-                ('ultra_strong_ai', 'UltraStrongAI')
+                ('gpu_ultra_strong_ai', 'UltraStrongAI')
             ]
             
             for module_name, class_name in ai_classes:

@@ -8,6 +8,18 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Set
 import threading
 import json
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+from othello_net import OthelloNet, AlphaZeroMCTS
 
 # 로깅 설정
 logging.basicConfig(
@@ -167,7 +179,7 @@ class SearchTimeoutException(Exception):
 class UltraStrongAI:
     """최강 오델로 AI - 이기는 것이 목표"""
     
-    def __init__(self, color, difficulty='ultra', time_limit=10.0):
+    def __init__(self, color, difficulty='ultra', time_limit=10.0, use_neural_net=False):
         self.color = color
         self.difficulty = difficulty
         self.time_limit = time_limit
@@ -183,6 +195,31 @@ class UltraStrongAI:
         self.multi_cut_depth = 3
         self.multi_cut_margin = 50
         self.multi_cut_attempts = 3
+
+        # 신경망 관련 추가
+        self.use_neural_net = use_neural_net
+        self.neural_net = None
+        self.mcts = None
+        self.training_mode = False
+
+        if use_neural_net and TORCH_AVAILABLE:
+            try:
+                from othello_net import OthelloNet, AlphaZeroMCTS
+                self.neural_net = OthelloNet()
+                self.mcts = AlphaZeroMCTS(self.neural_net, num_simulations=800)
+                self.load_model()
+            except ImportError as e:
+                logger.warning(f"신경망 모듈 로드 실패: {e}")
+                self.use_neural_net = False
+        elif use_neural_net and not TORCH_AVAILABLE:
+            logger.warning("PyTorch가 설치되지 않음. 신경망 기능 비활성화")
+            self.use_neural_net = False
+
+        # 하이브리드 평가 가중치
+        self.hybrid_weights = {
+            'neural': 0.7,    # 신경망 비중
+            'heuristic': 0.3  # 기존 휴리스틱 비중
+        }
 
         # 극강 설정
         if difficulty == 'ultra':
@@ -200,6 +237,9 @@ class UltraStrongAI:
             self.endgame_depth = 16
             self.use_perfect_endgame = False
             self.endgame_threshold = 8
+        
+        
+
         
         # 강화된 Transposition Table
         self.tt = {}
@@ -238,6 +278,108 @@ class UltraStrongAI:
         }
         
         logger.info(f"AI 초기화 완료: color={color}, difficulty={difficulty}, time_limit={time_limit}")
+
+    def load_model(self, model_path='models/best_model.pth'):
+        """훈련된 모델 로드"""
+        if not self.use_neural_net:
+            return
+        
+        try:
+            import torch
+            checkpoint = torch.load(model_path, map_location='cpu')
+            self.neural_net.load_state_dict(checkpoint['model_state_dict'])
+            self.neural_net.eval()
+            logger.info("신경망 모델 로드 완료")
+        except FileNotFoundError:
+            logger.warning("모델 파일을 찾을 수 없음. 랜덤 가중치 사용")
+        except Exception as e:
+            logger.error(f"모델 로드 중 오류: {e}")
+
+    def get_move(self, board, use_neural_net=None):
+        """신경망 사용 여부를 동적으로 결정"""
+        if use_neural_net is None:
+            use_neural_net = self.use_neural_net
+            
+        if use_neural_net and self.neural_net:
+            return self.get_move_with_neural_net(board)
+        else:
+            return self.get_move_traditional(board)
+    
+    def get_move_with_neural_net(self, board):
+        """신경망 기반 수 선택"""
+        if not self.mcts:
+            return self.get_move_traditional(board)
+        
+        # MCTS 탐색
+        action_probs = self.mcts.search(board, self.color)
+        
+        # 온도 매개변수를 사용한 수 선택
+        temperature = 0.1 if not self.training_mode else 1.0
+        
+        if temperature == 0:
+            # 가장 높은 확률의 수 선택
+            valid_moves = board.get_valid_moves(self.color)
+            best_prob = 0
+            best_move = valid_moves[0] if valid_moves else None
+            
+            for move in valid_moves:
+                action_idx = move[0] * 8 + move[1]
+                if action_probs[action_idx] > best_prob:
+                    best_prob = action_probs[action_idx]
+                    best_move = move
+            
+            return best_move
+        else:
+            # 확률적 선택
+            return self.sample_move_from_probs(board, action_probs, temperature)
+    
+    def hybrid_evaluate(self, board):
+        """하이브리드 평가 (기존 + 신경망)"""
+        traditional_score = self.ultra_evaluate_position(board)
+        
+        if self.use_neural_net and self.neural_net:
+            try:
+                _, neural_value = self.mcts.neural_net_predict(board, self.color)
+                neural_score = neural_value * 10000  # 스케일 조정
+                
+                # 게임 단계별 가중치 조정
+                stage = self.get_game_stage(board)
+                if stage == 'opening':
+                    neural_weight = 0.3
+                elif stage == 'midgame':
+                    neural_weight = 0.6
+                else:
+                    neural_weight = 0.8
+                
+                final_score = (traditional_score * (1 - neural_weight) + 
+                             neural_score * neural_weight)
+                return int(final_score)
+            except:
+                return traditional_score
+        
+        return traditional_score
+    
+    def sample_move_from_probs(self, board, action_probs, temperature):
+        """확률 분포에서 수 샘플링"""
+        valid_moves = board.get_valid_moves(self.color)
+        if not valid_moves:
+            return None
+        
+        move_probs = []
+        for move in valid_moves:
+            action_idx = move[0] * 8 + move[1]
+            prob = action_probs[action_idx] ** (1 / temperature)
+            move_probs.append(prob)
+        
+        total_prob = sum(move_probs)
+        if total_prob > 0:
+            move_probs = [p / total_prob for p in move_probs]
+            import numpy as np
+            return np.random.choice(valid_moves, p=move_probs)
+        else:
+            import random
+            return random.choice(valid_moves)
+
     
     def create_perfect_opening_book(self):
         """완벽한 오프닝북 생성"""
@@ -1422,8 +1564,59 @@ class UltraStrongAI:
             logger.info('' + '-' * 50)
         
         return result.best_move
+    def get_move_traditional(self, board):
+        """기존 방식의 수 선택 (신경망 없이)"""
+        self.nodes_searched = 0
+        self.tt_hits = 0
+        self.cutoffs = 0
+        self.perfect_searches = 0
+        self.multi_cut_prunes = 0
+        self.tt_age += 1
     
-
+        logger.info(f"AI 수 계산 시작 - 색깔: {'Black' if self.color == BLACK else 'White'}")
+    
+        # 오프닝북 먼저 시도
+        if board.get_empty_count() > 54:
+            opening_move = self.get_opening_move(board)
+            if opening_move:
+                logger.info(f"오프닝북 수 선택: {chr(opening_move[1] + ord('a'))}{opening_move[0] + 1}")
+                return opening_move
+    
+        # 기존 Alpha-Beta 방식 사용
+        result = self.ultra_iterative_deepening(board)
+        
+        # 상세 통계 출력
+        if result.time_ms > 100:
+            nps = result.nodes / (result.time_ms / 1000) if result.time_ms > 0 else 0
+            
+            print(f"🧠 Ultra AI Analysis:")
+            print(f" Best move: {chr(result.best_move[1] + ord('a'))}{result.best_move[0] + 1}")
+            print(f" Score: {result.score}")
+            print(f" Depth: {result.depth}")
+            print(f" Time: {result.time_ms}ms")
+    
+            logger.info(f"탐색 결과 (Alpha-Beta):")
+            logger.info(f" 최고 수: {chr(result.best_move[1] + ord('a'))}{result.best_move[0] + 1}")
+            logger.info(f" 점수: {result.score}")
+            logger.info(f" 깊이: {result.depth}")
+            logger.info(f" 노드: {result.nodes:,}")
+            logger.info(f" 시간: {result.time_ms}ms")
+            logger.info(f" NPS: {nps:,.0f}")
+            logger.info(f" TT 히트: {self.tt_hits:,}")
+            logger.info(f" 컷오프: {self.cutoffs:,}")
+            logger.info(f" Multi-Cut 가지치기: {self.multi_cut_prunes:,}")
+    
+            if self.perfect_searches > 0:
+                logger.info(f" 완벽 탐색: {self.perfect_searches}")
+            logger.info(f" 정확성: {'예' if result.is_exact else '아니오'}")
+    
+            if result.pv and len(result.pv) > 1:
+                pv_str = " ".join([f"{chr(move[1] + ord('a'))}{move[0] + 1}" for move in result.pv[:5]])
+                logger.info(f" 주변이: {pv_str}")
+    
+            logger.info(f" 평가 분석: {result.eval_breakdown}")
+            logger.info('-' * 50)
+    
 # 사용 예시
 def demo_game():
     """데모 게임"""
