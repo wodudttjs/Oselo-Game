@@ -62,7 +62,7 @@ def setup_ai_logger():
     os.makedirs(debug_dir, exist_ok=True)
     
     # 세션별 고유 타임스탬프 생성
-    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
     session_id = f"session_{session_timestamp}"
     
     # 로그 파일명들 생성
