@@ -2,11 +2,23 @@ import time
 import random
 import hashlib
 import math
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional, Set
 import threading
 import json
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('othello_ai.log')
+    ]
+)
+logger = logging.getLogger('OthelloAI')
 
 # Constants
 BLACK = 1
@@ -148,6 +160,10 @@ class UltraSearchResult:
     pv: List[Tuple[int, int]]
     eval_breakdown: Dict[str, float]
 
+class SearchTimeoutException(Exception):
+    """탐색 시간 초과 예외"""
+    pass
+
 class UltraStrongAI:
     """최강 오델로 AI - 이기는 것이 목표"""
     
@@ -156,14 +172,26 @@ class UltraStrongAI:
         self.difficulty = difficulty
         self.time_limit = time_limit
         
+        # 통계
+        self.nodes_searched = 0
+        self.tt_hits = 0
+        self.cutoffs = 0
+        self.perfect_searches = 0
+        self.multi_cut_prunes = 0  # ← 여기 추가
+
+        # Multi-Cut 설정 ← 여기 추가
+        self.multi_cut_depth = 3
+        self.multi_cut_margin = 50
+        self.multi_cut_attempts = 3
+
         # 극강 설정
         if difficulty == 'ultra':
-            self.max_depth = 18
+            self.max_depth = 20  # 증가
             self.endgame_depth = 64
             self.use_perfect_endgame = True
             self.endgame_threshold = 16
         elif difficulty == 'hard':
-            self.max_depth = 14
+            self.max_depth = 16
             self.endgame_depth = 20
             self.use_perfect_endgame = True
             self.endgame_threshold = 12
@@ -189,11 +217,9 @@ class UltraStrongAI:
         # 패턴 평가 시스템
         self.pattern_values = self.initialize_patterns()
         
-        # 통계
-        self.nodes_searched = 0
-        self.tt_hits = 0
-        self.cutoffs = 0
-        self.perfect_searches = 0
+        # 시간 관리
+        self.start_time = 0
+        self.end_time = 0
         
         # 게임 단계별 최적화된 가중치
         self.stage_weights = {
@@ -210,6 +236,8 @@ class UltraStrongAI:
                 'discs': 2.0, 'frontier': -0.1, 'patterns': 0.5, 'parity': 1.0
             }
         }
+        
+        logger.info(f"AI 초기화 완료: color={color}, difficulty={difficulty}, time_limit={time_limit}")
     
     def create_perfect_opening_book(self):
         """완벽한 오프닝북 생성"""
@@ -242,6 +270,11 @@ class UltraStrongAI:
         
         return patterns
     
+    def check_time_limit(self):
+        """시간 제한 확인"""
+        if time.time() > self.end_time:
+            raise SearchTimeoutException("시간 초과")
+    
     def get_game_stage(self, board):
         """현재 게임 단계 정확히 판단"""
         moves_played = 64 - board.get_empty_count() - 4
@@ -252,6 +285,7 @@ class UltraStrongAI:
             return 'midgame'
         else:
             return 'endgame'
+    
     
     def ultra_evaluate_position(self, board):
         """극강 위치 평가 함수"""
@@ -548,7 +582,7 @@ class UltraStrongAI:
         return score
     
     def detect_wedge_patterns(self, board):
-        """쐐기 패턴 탐지 - 코너를 향한 대각선 패턴"""
+        """쐐기 패턴 탐지 - 코너을 향한 대각선 패턴"""
         score = 0
         
         for corner in CORNERS:
@@ -687,7 +721,8 @@ class UltraStrongAI:
             return 50 if self.color == WHITE else -50
     
     def perfect_endgame_search(self, board, alpha, beta, player, passes=0):
-        """완벽한 종료게임 탐색 (통합 버전)"""
+        """완벽한 종료게임 탐색"""
+        self.check_time_limit()
         self.perfect_searches += 1
         
         current_color = player
@@ -728,31 +763,33 @@ class UltraStrongAI:
         
         return best_score, best_move
     
-    def ultra_negamax(self, board, depth, alpha, beta, player, end_time, passes=0):
-        """울트라 강화된 네가맥스 (통합 버전)"""
-        self.nodes_searched += 1
-        
-        if time.time() > end_time:
-            return self.ultra_evaluate_position(board), None
-        
-        # 완벽한 종료게임 탐색
-        empty_count = board.get_empty_count()
-        if (self.use_perfect_endgame and 
-            empty_count <= self.endgame_threshold and 
-            depth >= empty_count):
-            return self.perfect_endgame_search(board, alpha, beta, player, passes)
-        
-        # TT 조회
-        board_hash = self.get_board_hash(board)
-        tt_score = self.probe_tt(board_hash, depth, alpha, beta)
-        if tt_score is not None:
-            return tt_score, None
-        
-        current_color = player
-        moves = board.get_valid_moves(current_color)
-        
-        # 터미널 조건
-        if depth == 0 or not moves:
+    def ultra_negamax(self, board, depth, alpha, beta, player, passes=0):
+        """울트라 강화된 네가맥스"""
+        try:
+            self.check_time_limit()
+            self.nodes_searched += 1
+            
+            # 완벽한 종료게임 탐색
+            empty_count = board.get_empty_count()
+            if (self.use_perfect_endgame and 
+                empty_count <= self.endgame_threshold and 
+                depth >= empty_count):
+                return self.perfect_endgame_search(board, alpha, beta, player, passes)
+            
+            # TT 조회
+            board_hash = self.get_board_hash(board)
+            tt_result = self.probe_tt(board_hash, depth, alpha, beta)
+            if tt_result is not None:
+                return tt_result, None
+            
+            current_color = player
+            moves = board.get_valid_moves(current_color)
+
+
+            # 터미널 조건
+            if depth == 0:
+                return self.ultra_evaluate_position(board), None
+                
             if not moves:
                 opponent_moves = board.get_valid_moves(opponent(current_color))
                 if not opponent_moves:
@@ -760,57 +797,128 @@ class UltraStrongAI:
                     return self.ultra_evaluate_position(board), None
                 else:
                     # 패스
+                    if passes >= 1:
+                        return self.ultra_evaluate_position(board), None
                     score, move = self.ultra_negamax(board, depth, -beta, -alpha, 
-                                                   opponent(current_color), end_time, passes + 1)
+                                                   opponent(current_color), passes + 1)
                     return -score, None
-            else:
-                return self.ultra_evaluate_position(board), None
-        
-        # 울트라 강화된 무브 정렬
-        ordered_moves = self.ultra_order_moves(board, moves, depth, current_color)
-        best_move = None
-        original_alpha = alpha
-        best_score = alpha
-        
-        for i, move in enumerate(ordered_moves):
-            new_board = board.apply_move(*move, current_color)
+            # Multi-Cut Pruning
+            if (depth >= self.multi_cut_depth and 
+                len(moves) > self.multi_cut_attempts and
+                not self.is_critical_position(board)):
+
+                multi_cut_count = 0
+                multi_cut_tested = 0
+
+                # 처음 몇 개 수로 Multi-Cut 테스트
+                for i, move in enumerate(moves[:self.multi_cut_attempts]):
+                    new_board = board.apply_move(*move, current_color)
+
+                    # 얕은 탐색으로 빠른 평가
+                    test_score, _ = self.ultra_negamax(new_board, depth - 3, 
+                                                     -beta, -alpha, opponent(current_color), 0)
+                    test_score = -test_score
+                    multi_cut_tested += 1
+
+                    if test_score >= beta:
+                        multi_cut_count += 1
+
+                    # 충분한 수가 베타 컷오프를 보이면 전체 가지치기
+                    if multi_cut_count >= 2 and multi_cut_tested >= 2:
+                        self.multi_cut_prunes += 1
+                        return beta, None
             
-            # Late Move Reduction (LMR)
-            reduction = 0
-            if (i > 3 and depth > 3 and 
-                move not in self.killer_moves.get(depth, []) and
-                not self.is_tactical_move(board, move)):
-                reduction = 1
+            # 울트라 강화된 무브 정렬
+            ordered_moves = self.ultra_order_moves(board, moves, depth, current_color)
+            best_move = None
+            original_alpha = alpha
+            best_score = alpha
             
-            score, _ = self.ultra_negamax(new_board, depth - 1 - reduction, 
-                                        -beta, -best_score, opponent(current_color), end_time, 0)
-            score = -score
-            
-            # LMR에서 좋은 결과가 나오면 전체 깊이로 재탐색
-            if reduction > 0 and score > alpha:
-                score, _ = self.ultra_negamax(new_board, depth - 1, 
-                                            -beta, -best_score, opponent(current_color), end_time, 0)
+            for i, move in enumerate(ordered_moves):
+                new_board = board.apply_move(*move, current_color)
+                
+                # Late Move Reduction (LMR) - 더 보수적으로 적용
+                reduction = 0
+                if (i > 4 and depth > 4 and 
+                    move not in self.killer_moves.get(depth, []) and
+                    not self.is_tactical_move(board, move)):
+                    reduction = min(2, depth // 4)  # 최대 2 감소
+                
+                # PVS (Principal Variation Search)
+                if i == 0:
+                    # 첫 번째 수는 전체 윈도우로 탐색
+                    score, _ = self.ultra_negamax(new_board, depth - 1 - reduction, 
+                                                -beta, -best_score, opponent(current_color), 0)
+                else:
+                    # null window 탐색
+                    score, _ = self.ultra_negamax(new_board, depth - 1 - reduction, 
+                                                -best_score - 1, -best_score, opponent(current_color), 0)
+                    
+                    # null window에서 좋은 결과가 나오면 전체 윈도우로 재탐색
+                    if -score > best_score and -score < beta:
+                        score, _ = self.ultra_negamax(new_board, depth - 1 - reduction, 
+                                                    -beta, -score, opponent(current_color), 0)
+                
                 score = -score
+                
+                # LMR에서 좋은 결과가 나오면 전체 깊이로 재탐색
+                if reduction > 0 and score > best_score:
+                    score, _ = self.ultra_negamax(new_board, depth - 1, 
+                                                -beta, -best_score, opponent(current_color), 0)
+                    score = -score
+                
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+                
+                if best_score >= beta:
+                    # Beta cutoff
+                    self.cutoffs += 1
+                    self.update_killer_moves(depth, move)
+                    break
             
-            if score > best_score:
-                best_score = score
-                best_move = move
+            # 히스토리 테이블 업데이트
+            if best_move:
+                self.history_table[best_move] += depth * depth
             
-            if best_score >= beta:
-                # Beta cutoff
-                self.cutoffs += 1
-                self.update_killer_moves(depth, move)
-                break
+            # TT 저장
+            flag = 'EXACT' if original_alpha < best_score < beta else ('BETA' if best_score >= beta else 'ALPHA')
+            self.store_tt(board_hash, depth, best_score, flag, best_move)
+            
+            return best_score, best_move
+            
+        except SearchTimeoutException:
+            # 시간 초과 시 현재까지의 평가값 반환
+            return self.ultra_evaluate_position(board), None
+    
+    def is_critical_position(self, board):
+        """중요한 포지션인지 판단 (기존 코드에 추가)"""
+        # 코너 근처 수가 있는지
+        moves = board.get_valid_moves(self.color)
+        for move in moves:
+            if self.is_near_corner(move):
+                return True
         
-        # 히스토리 테이블 업데이트
-        if best_move:
-            self.history_table[best_move] += depth * depth
+        # Mobility가 매우 제한적인지
+        my_moves = len(board.get_valid_moves(self.color))
+        opp_moves = len(board.get_valid_moves(opponent(self.color)))
         
-        # TT 저장
-        flag = 'EXACT' if original_alpha < best_score < beta else ('BETA' if best_score >= beta else 'ALPHA')
-        self.store_tt(board_hash, depth, best_score, flag, best_move)
+        if my_moves <= 2 or abs(my_moves - opp_moves) >= 5:
+            return True
         
-        return best_score, best_move
+        # 게임 후반부
+        if board.get_empty_count() <= 20:
+            return True
+        
+        return False
+
+    def is_near_corner(self, move):
+        """코너 근처 수인지 판단"""
+        x, y = move
+        for corner in CORNERS:
+            if abs(x - corner[0]) <= 2 and abs(y - corner[1]) <= 2:
+                return True
+        return False
     
     def is_tactical_move(self, board, move):
         """전술적 수인지 판단"""
@@ -830,6 +938,100 @@ class UltraStrongAI:
             return True
         
         return False
+    # ← 아래 메서드들이 누락됨
+    def mtdf(self, board, guess, depth, player):
+        """MTD(f) - Memory-enhanced Test Driver"""
+        try:
+            g = guess
+            upper_bound = float('inf')
+            lower_bound = float('-inf')
+            
+            while lower_bound < upper_bound:
+                self.check_time_limit()
+                
+                if g == lower_bound:
+                    beta = g + 1
+                else:
+                    beta = g
+                
+                g, _ = self.ultra_negamax(board, depth, beta - 1, beta, player, 0)
+                
+                if g < beta:
+                    upper_bound = g
+                else:
+                    lower_bound = g
+                    
+            return g
+            
+        except SearchTimeoutException:
+            return guess
+
+    def get_best_move_from_tt(self, board, depth):
+        """TT에서 현재 보드의 최고 수 가져오기"""
+        board_hash = self.get_board_hash(board)
+        if board_hash in self.tt:
+            entry = self.tt[board_hash]
+            if entry.get('depth', 0) >= depth and entry.get('best_move'):
+                return entry['best_move']
+        
+        # TT에 없으면 첫 번째 유효한 수 반환
+        moves = board.get_valid_moves(self.color)
+        return moves[0] if moves else None
+
+    def ultra_iterative_deepening_mtdf(self, board):
+        """MTD(f)를 사용한 반복 심화"""
+        self.start_time = time.time()
+        self.end_time = self.start_time + self.time_limit
+        
+        logger.info(f"MTD(f) 탐색 시작 - 시간 제한: {self.time_limit}초")
+        
+        moves = board.get_valid_moves(self.color)
+        if not moves:
+            return UltraSearchResult(0, None, 0, 0, 0, True, [], {})
+        
+        if len(moves) == 1:
+            return UltraSearchResult(0, moves[0], 1, 1, 1, False, [moves[0]], {})
+        
+        # 초기 추정값
+        guess = self.ultra_evaluate_position(board)
+        best_move = moves[0]
+        max_depth_reached = 0
+        
+        try:
+            for depth in range(1, self.max_depth + 1):
+                if time.time() > self.end_time:
+                    break
+                    
+                # MTD(f)로 탐색
+                score = self.mtdf(board, guess, depth, self.color)
+                
+                # 최고 수 찾기 (root에서만)
+                move = self.get_best_move_from_tt(board, depth)
+                if move:
+                    best_move = move
+                    max_depth_reached = depth
+                    guess = score  # 다음 반복의 초기값
+                    
+                    logger.info(f"MTD(f) 깊이 {depth} 완료: score={score}, move={best_move}")
+                
+                if time.time() > self.start_time + self.time_limit * 0.85:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"MTD(f) 탐색 중 오류: {e}")
+        
+        elapsed_ms = int((time.time() - self.start_time) * 1000)
+        
+        return UltraSearchResult(
+            score=guess,
+            best_move=best_move,
+            depth=max_depth_reached,
+            nodes=self.nodes_searched,
+            time_ms=elapsed_ms,
+            is_exact=False,
+            pv=self.extract_pv(board, best_move, max_depth_reached),
+            eval_breakdown={}
+        )
     
     def ultra_order_moves(self, board, moves, depth, current_color):
         """울트라 강화된 무브 정렬"""
@@ -982,7 +1184,7 @@ class UltraStrongAI:
         return None
     
     def clear_old_tt_entries(self):
-        """오래된 TT 엔트리 정리 (효율적 버전)"""
+        """오래된 TT 엔트리 정리"""
         if len(self.tt) < self.max_tt_size * 0.8:
             return
             
@@ -1035,14 +1237,18 @@ class UltraStrongAI:
     
     def ultra_iterative_deepening(self, board):
         """울트라 강화된 반복 심화"""
-        start_time = time.time()
-        end_time = start_time + self.time_limit
+        self.start_time = time.time()
+        self.end_time = self.start_time + self.time_limit
+        
+        logger.info(f"탐색 시작 - 시간 제한: {self.time_limit}초")
         
         moves = board.get_valid_moves(self.color)
         if not moves:
+            logger.info("가능한 수가 없음")
             return UltraSearchResult(0, None, 0, 0, 0, True, [], {})
         
         if len(moves) == 1:
+            logger.info(f"유일한 수: {moves[0]}")
             return UltraSearchResult(0, moves[0], 1, 1, 1, False, [moves[0]], {})
         
         best_move = moves[0]
@@ -1050,57 +1256,78 @@ class UltraStrongAI:
         pv = []
         eval_breakdown = {}
         
-        # Aspiration Window Search
-        aspiration_window = 50
+        # Aspiration Window Search - 더 보수적으로 설정
+        aspiration_window = 100
         alpha = best_score - aspiration_window
         beta = best_score + aspiration_window
         
         max_depth_reached = 0
         
-        for depth in range(1, self.max_depth + 1):
-            try:
-                if time.time() > end_time:
+        try:
+            for depth in range(1, self.max_depth + 1):
+                depth_start_time = time.time()
+                logger.debug(f"깊이 {depth} 탐색 시작")
+                
+                if time.time() > self.end_time:
+                    logger.info(f"시간 초과로 깊이 {depth}에서 중단")
                     break
                 
                 # Aspiration window로 탐색
-                score, move = self.ultra_negamax(board, depth, alpha, beta, self.color, end_time, 0)
-                
-                # Window 밖의 결과가 나오면 전체 범위로 재탐색
-                if score <= alpha or score >= beta:
-                    score, move = self.ultra_negamax(board, depth, float('-inf'), float('inf'), self.color, end_time, 0)
-                
-                if move and time.time() <= end_time:
-                    best_move = move
-                    best_score = score
-                    max_depth_reached = depth
+                try:
+                    score, move = self.ultra_negamax(board, depth, alpha, beta, self.color, 0)
                     
-                    # Principal Variation 수집
-                    pv = self.extract_pv(board, best_move, depth)
+                    # Window 밖의 결과가 나오면 전체 범위로 재탐색
+                    if score <= alpha:
+                        logger.debug(f"깊이 {depth}: alpha cutoff, 재탐색")
+                        alpha = float('-inf')
+                        score, move = self.ultra_negamax(board, depth, alpha, beta, self.color, 0)
+                    elif score >= beta:
+                        logger.debug(f"깊이 {depth}: beta cutoff, 재탐색")
+                        beta = float('inf')
+                        score, move = self.ultra_negamax(board, depth, alpha, beta, self.color, 0)
                     
-                    # 다음 반복을 위한 aspiration window 업데이트
-                    alpha = score - aspiration_window
-                    beta = score + aspiration_window
-                
-                # 완전 탐색 달성 시 중단
-                if depth >= board.get_empty_count():
+                    if move and time.time() <= self.end_time:
+                        best_move = move
+                        best_score = score
+                        max_depth_reached = depth
+                        
+                        # Principal Variation 수집
+                        pv = self.extract_pv(board, best_move, depth)
+                        
+                        # 다음 반복을 위한 aspiration window 업데이트
+                        alpha = score - aspiration_window
+                        beta = score + aspiration_window
+                        
+                        depth_time = time.time() - depth_start_time
+                        logger.info(f"깊이 {depth} 완료: score={score}, move={best_move}, time={depth_time:.3f}s")
+                    
+                    # 완전 탐색 달성 시 중단
+                    if depth >= board.get_empty_count():
+                        logger.info(f"완전 탐색 달성 (깊이 {depth})")
+                        break
+                    
+                    # 시간 관리 - 더 보수적으로
+                    elapsed = time.time() - self.start_time
+                    if elapsed > self.time_limit * 0.85:  # 85%에서 중단
+                        logger.info(f"시간 제한 85% 도달, 탐색 중단")
+                        break
+                        
+                except SearchTimeoutException:
+                    logger.info(f"깊이 {depth}에서 시간 초과")
                     break
-                
-                # 시간 관리
-                elapsed = time.time() - start_time
-                if elapsed > self.time_limit * 0.7:
-                    break
                     
-            except Exception as e:
-                print(f"Error in depth {depth}: {e}")
-                break
+        except Exception as e:
+            logger.error(f"탐색 중 오류 발생: {e}")
         
-        elapsed_ms = int((time.time() - start_time) * 1000)
+        elapsed_ms = int((time.time() - self.start_time) * 1000)
         
         # 평가 분석
         if best_move:
             final_board = board.apply_move(*best_move, self.color)
             final_eval = self.ultra_evaluate_position(final_board)
             eval_breakdown = {'final_eval': final_eval}
+        
+        logger.info(f"탐색 완료: depth={max_depth_reached}, nodes={self.nodes_searched}, time={elapsed_ms}ms")
         
         return UltraSearchResult(
             score=best_score,
@@ -1136,45 +1363,66 @@ class UltraStrongAI:
         
         return pv
     
-    def get_move(self, board):
+    def get_move(self, board, use_mtdf=True):
         """최고의 수 반환"""
         self.nodes_searched = 0
         self.tt_hits = 0
         self.cutoffs = 0
         self.perfect_searches = 0
+        self.multi_cut_prunes = 0
         self.tt_age += 1
+        
+        logger.info(f"AI 수 계산 시작 - 색깔: {'Black' if self.color == BLACK else 'White'}")
         
         # 오프닝북 먼저 시도
         if board.get_empty_count() > 54:
             opening_move = self.get_opening_move(board)
             if opening_move:
-                print(f"Opening book move: {chr(opening_move[1] + ord('a'))}{opening_move[0] + 1}")
+                logger.info(f"오프닝북 수 선택: {chr(opening_move[1] + ord('a'))}{opening_move[0] + 1}")
                 return opening_move
         
-        # 메인 탐색
-        start_time = time.time()
-        result = self.ultra_iterative_deepening(board)
+        # MTD(f) 또는 기존 방식 선택
+        if use_mtdf:
+            result = self.ultra_iterative_deepening_mtdf(board)
+            search_type = "MTD(f)"
+        else:
+            result = self.ultra_iterative_deepening(board)
+            search_type = "Alpha-Beta"
+        
         
         # 상세 통계 출력
         if result.time_ms > 100:
             nps = result.nodes / (result.time_ms / 1000) if result.time_ms > 0 else 0
+            
+            # 콘솔 출력 (간단하게)
             print(f"🧠 Ultra AI Analysis:")
             print(f"   Best move: {chr(result.best_move[1] + ord('a'))}{result.best_move[0] + 1}")
             print(f"   Score: {result.score}")
             print(f"   Depth: {result.depth}")
-            print(f"   Nodes: {result.nodes:,}")
             print(f"   Time: {result.time_ms}ms")
-            print(f"   NPS: {nps:,.0f}")
-            print(f"   TT hits: {self.tt_hits:,}")
-            print(f"   Cutoffs: {self.cutoffs:,}")
+            
+            # 로그 출력 (상세하게)
+            logger.info(f"탐색 결과 ({search_type}):")  # ← search_type 추가
+            logger.info(f"  최고 수: {chr(result.best_move[1] + ord('a'))}{result.best_move[0] + 1}")
+            logger.info(f"  점수: {result.score}")
+            logger.info(f"  깊이: {result.depth}")
+            logger.info(f"  노드: {result.nodes:,}")
+            logger.info(f"  시간: {result.time_ms}ms")
+            logger.info(f"  NPS: {nps:,.0f}")
+            logger.info(f"  TT 히트: {self.tt_hits:,}")
+            logger.info(f"  컷오프: {self.cutoffs:,}")
+            logger.info(f"  Multi-Cut 가지치기: {self.multi_cut_prunes:,}")  # 추가
             if self.perfect_searches > 0:
-                print(f"   Perfect searches: {self.perfect_searches}")
-            print(f"   Exact: {'Yes' if result.is_exact else 'No'}")
+                logger.info(f"  완벽 탐색: {self.perfect_searches}")
+            logger.info(f"  정확성: {'예' if result.is_exact else '아니오'}")
             if result.pv and len(result.pv) > 1:
                 pv_str = " ".join([f"{chr(move[1] + ord('a'))}{move[0] + 1}" for move in result.pv[:5]])
-                print(f"   PV: {pv_str}")
+                logger.info(f"  주변이: {pv_str}")
+            logger.info(f"  평가 분석: {result.eval_breakdown}")
+            logger.info('' + '-' * 50)
         
         return result.best_move
+    
 
 # 사용 예시
 def demo_game():
@@ -1188,6 +1436,7 @@ def demo_game():
     current_player = BLACK
     pass_count = 0
     
+    logger.info("게임 시작")
     print("🎮 Ultra Strong Othello AI Demo")
     print("=" * 50)
     
@@ -1195,6 +1444,7 @@ def demo_game():
         moves = board.get_valid_moves(current_player)
         
         if not moves:
+            logger.info(f"{'Black' if current_player == BLACK else 'White'} 패스")
             print(f"{'Black' if current_player == BLACK else 'White'} passes")
             pass_count += 1
             current_player = opponent(current_player)
@@ -1204,15 +1454,17 @@ def demo_game():
         
         # AI 수 선택
         if current_player == BLACK:
-            move = black_ai.get_move(board)
+            move = black_ai.get_move(board, use_mtdf=True)  # MTD(f) 사용
             player_name = "Black (Ultra)"
         else:
-            move = white_ai.get_move(board)
+            move = white_ai.get_move(board, use_mtdf=False)  # 기존 방식
             player_name = "White (Hard)"
         
         if move:
             board = board.apply_move(*move, current_player)
-            print(f"{player_name} plays: {chr(move[1] + ord('a'))}{move[0] + 1}")
+            move_str = f"{chr(move[1] + ord('a'))}{move[0] + 1}"
+            logger.info(f"{player_name} 수: {move_str}")
+            print(f"{player_name} plays: {move_str}")
             
             # 보드 상태 출력 (간단히)
             b, w = board.count_stones()
@@ -1223,14 +1475,18 @@ def demo_game():
     
     # 최종 결과
     b, w = board.count_stones()
+    logger.info(f"게임 종료 - Black: {b}, White: {w}")
     print("\n🏆 Game Over!")
     print(f"Final Score - Black: {b}, White: {w}")
     if b > w:
         print("Black (Ultra AI) Wins!")
+        logger.info("Black (Ultra AI) 승리!")
     elif w > b:
         print("White (Hard AI) Wins!")
+        logger.info("White (Hard AI) 승리!")
     else:
         print("Draw!")
+        logger.info("무승부!")
 
 if __name__ == "__main__":
     demo_game()
