@@ -339,6 +339,40 @@ class BoardAdapter:
             self.gpu_manager.clear_memory()
             logger.debug("GPU memory cleaned up via adapter")
 
+    def get_board_array(self):
+        """보드 배열 반환 (호환성 메서드)"""
+        return self.board
+    
+    def set_board_array(self, board_array):
+        """보드 배열 설정 (호환성 메서드)"""
+        self.board = board_array
+    
+    def is_game_over(self):
+        """게임 종료 여부 확인"""
+        if self.use_gpu and self.gpu_board:
+            return self.gpu_board.is_game_over()
+        else:
+            # CPU 보드용 구현
+            black_moves = self.get_valid_moves(BLACK)
+            white_moves = self.get_valid_moves(WHITE)
+            return len(black_moves) == 0 and len(white_moves) == 0
+    
+    def get_winner(self):
+        """승자 반환"""
+        if self.use_gpu and self.gpu_board:
+            return self.gpu_board.get_winner()
+        else:
+            if not self.is_game_over():
+                return None
+                
+            black_count, white_count = self.count_stones()
+            if black_count > white_count:
+                return BLACK
+            elif white_count > black_count:
+                return WHITE
+            else:
+                return 0  # 무승부
+
 class AIAdapter:
     """
     기존 AI 클래스와 GPU AI 클래스 간의 어댑터
@@ -353,24 +387,6 @@ class AIAdapter:
             difficulty: 난이도
             time_limit: 시간 제한
         """
-
-        # 기본적으로 신경망 AI 사용
-        if ai_type == 'auto':
-            ai_type = 'neural'  # 항상 신경망 우선
-            
-        # 신경망 AI 강제 사용
-        from gpu_ultra_strong_ai import UltraStrongAI
-        self.ai_instance = UltraStrongAI(
-            color, 
-            difficulty, 
-            time_limit,
-            use_neural_net=True  # 항상 신경망 사용
-        )
-        
-        # 연속 학습 활성화
-        if hasattr(self.ai_instance, 'continuous_learning'):
-            self.ai_instance.continuous_learning = True
-
         self.color = color
         self.ai_type = ai_type
         self.difficulty = difficulty
@@ -378,15 +394,25 @@ class AIAdapter:
         self.ai_instance = None
         self.use_gpu = False
         
+        # 중복된 초기화 코드 제거하고 _initialize_ai 먼저 호출
         self._initialize_ai()
         
-        logger.info(f"AI Adapter initialized: type={ai_type}, gpu={self.use_gpu}, difficulty={difficulty}")
+        # 신경망 관련 설정은 AI 초기화 후에
+        if ai_type == 'auto':
+            ai_type = 'neural'  # 항상 신경망 우선
+            
+        # 신경망 AI 강제 사용을 위한 추가 설정
+        if self.use_gpu and hasattr(self.ai_instance, 'use_neural_net'):
+            self.ai_instance.use_neural_net = True
+            if hasattr(self.ai_instance, 'continuous_learning'):
+                self.ai_instance.continuous_learning = True
+        
+        logger.info(f"AI Adapter initialized: type={self.ai_type}, gpu={self.use_gpu}, difficulty={difficulty}")
     
     def _initialize_ai(self):
-        """AI 인스턴스 초기화"""
+        """AI 인스턴스 초기화 - 수정된 버전"""
         if self.ai_type == 'auto':
             # 자동 선택: GPU 사용 가능하면 GPU, 아니면 CPU
-
             try:
                 from gpu_ultra_strong_ai import UltraStrongAI, GPUManager
                 gpu_manager = GPUManager()
@@ -400,7 +426,7 @@ class AIAdapter:
             except ImportError:
                 self._fallback_to_cpu_ai()
         
-        elif self.ai_type == 'gpu':
+        elif self.ai_type in ['gpu', 'neural']:  # 'neural' 타입 추가
             # 강제 GPU 사용
             try:
                 from gpu_ultra_strong_ai import UltraStrongAI

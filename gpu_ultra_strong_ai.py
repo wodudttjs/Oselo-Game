@@ -204,6 +204,33 @@ class GPUBoard:
         new_board.move_history = self.move_history.copy()
         return new_board
     
+    def get_board_array(self):
+        """보드 배열 반환 (호환성을 위해)"""
+        return self.gpu.to_cpu(self.board)
+    
+    def set_board_array(self, board_array):
+        """보드 배열 설정 (호환성을 위해)"""
+        self.board = self.gpu.to_gpu(np.array(board_array, dtype=np.int8))
+    
+    def is_game_over(self):
+        """게임 종료 여부 확인"""
+        black_moves = self.get_valid_moves(BLACK)
+        white_moves = self.get_valid_moves(WHITE)
+        return len(black_moves) == 0 and len(white_moves) == 0
+    
+    def get_winner(self):
+        """승자 반환"""
+        if not self.is_game_over():
+            return None
+            
+        black_count, white_count = self.count_stones()
+        if black_count > white_count:
+            return BLACK
+        elif white_count > black_count:
+            return WHITE
+        else:
+            return 0  # 무승부
+        
     def is_valid_move(self, x, y, color):
         """
         유효한 수인지 확인
@@ -1082,10 +1109,17 @@ class UltraStrongAI:
     탐색 알고리즘과 평가 함수를 GPU에서 병렬 처리
     """
     
-    def __init__(self, color, difficulty='ultra', time_limit=10.0,use_neural_net=True):
+    def __init__(self, color, difficulty='ultra', time_limit=10.0, use_neural_net=True):
         self.color = color
         self.difficulty = difficulty
         self.time_limit = time_limit
+        
+        # 통계 변수들을 먼저 초기화 (속성 오류 방지)
+        self.nodes_searched = 0
+        self.tt_hits = 0
+        self.cutoffs = 0
+        self.perfect_searches = 0
+        self.tt_age = 0
         
         # GPU 관리자 및 평가자 초기화
         self.gpu = GPUManager()
@@ -1096,7 +1130,6 @@ class UltraStrongAI:
         
         # 강화된 Transposition Table
         self.tt = {}
-        self.tt_age = 0
         self.max_tt_size = 1000000
         
         # 고급 휴리스틱들
@@ -1104,32 +1137,131 @@ class UltraStrongAI:
         self.history_table = defaultdict(int)
         self.counter_moves = defaultdict(list)
         
-        # 통계
-        self.nodes_searched = 0
-        self.tt_hits = 0
-        self.cutoffs = 0
-        self.perfect_searches = 0
-
-        # 신경망 관련 추가
-        # 기본적으로 신경망 사용
+        # 신경망 관련 설정
         self.use_neural_net = use_neural_net and TORCH_AVAILABLE
-        
-        # 항상 학습 모드 활성화
         self.continuous_learning = True
         self.learning_buffer = deque(maxlen=10000)
         
         # 자동 학습 스케줄러
         self.games_since_training = 0
         self.training_interval = 10  # 10게임마다 학습
-
-        if self.use_neural_net:
-            self.neural_net = GPUOthelloNet().to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            self.mcts = GPUAlphaZeroMCTS(self.neural_net, self.gpu, num_simulations=800)
-            self.trainer = GPUSelfPlayTrainer(self.neural_net, self.gpu)
-            self.load_model()
         
-        logger.info(f"UltraStrongAI initialized - Color: {color}, Difficulty: {difficulty}, GPU: {self.gpu.gpu_available}")
+        # 신경망 초기화
+        if self.use_neural_net:
+            try:
+                self.neural_net = GPUOthelloNet().to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+                self.mcts = GPUAlphaZeroMCTS(self.neural_net, self.gpu, num_simulations=800)
+                self.trainer = GPUSelfPlayTrainer(self.neural_net, self.gpu)
+                self.load_model()
+                logger.info("Neural network components initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize neural network: {e}")
+                self.use_neural_net = False
+                self.neural_net = None
+                self.mcts = None
+                self.trainer = None
+        else:
+            self.neural_net = None
+            self.mcts = None
+            self.trainer = None
+        
+        logger.info(f"UltraStrongAI initialized - Color: {color}, Difficulty: {difficulty}, GPU: {self.gpu.gpu_available}, Neural: {self.use_neural_net}")
+    
+    def alpha_beta_search(self, board, depth, alpha, beta, maximizing):
+        """알파베타 탐색 메서드 - 누락된 메서드 구현"""
+        try:
+            end_time = time.time() + min(self.time_limit, 10.0)  # 최대 10초 제한
+            
+            # GPU 네가맥스 호출
+            score, move = self.gpu_negamax(board, depth, alpha, beta, maximizing, end_time)
+            return score, move
+            
+        except Exception as e:
+            logger.error(f"Alpha-beta search failed: {e}")
+            # 백업: 첫 번째 유효한 수 반환
+            valid_moves = board.get_valid_moves(self.color if maximizing else opponent(self.color))
+            if valid_moves:
+                return 0, valid_moves[0]
+            return 0, None
+    
+    def _safe_train_cpu_model(self):
+        """CPU 모델 안전 훈련 - training_pipeline.py에서 이동"""
+        try:
+            if not hasattr(self, 'neural_net') or not self.neural_net:
+                return False
+                
+            batch_size = 16
+            epochs = 2
+            
+            # 훈련 데이터 샘플링
+            if len(self.learning_buffer) < batch_size:
+                return False
+                
+            sample_data = list(self.learning_buffer)[-min(1000, len(self.learning_buffer)):]
+            
+            total_loss = 0
+            batches = 0
+            
+            for epoch in range(epochs):
+                for i in range(0, len(sample_data), batch_size):
+                    batch = sample_data[i:i+batch_size]
+                    if len(batch) < batch_size:
+                        continue
+                    
+                    try:
+                        # 배치 데이터 준비
+                        boards = torch.stack([item['board'] for item in batch])
+                        
+                        # Move를 action index로 변환
+                        target_policies = []
+                        for item in batch:
+                            move = item['move']
+                            action_idx = move[0] * 8 + move[1]
+                            target_policies.append(action_idx)
+                        
+                        target_policies = torch.tensor(target_policies, dtype=torch.long)
+                        target_values = torch.tensor([item['value'] for item in batch], 
+                                                   dtype=torch.float32).unsqueeze(1)
+                        
+                        # GPU로 이동
+                        device = next(self.neural_net.parameters()).device
+                        boards = boards.to(device)
+                        target_policies = target_policies.to(device)
+                        target_values = target_values.to(device)
+                        
+                        # 순전파
+                        self.trainer.optimizer.zero_grad()
+                        pred_policies, pred_values = self.neural_net(boards)
+                        
+                        # 손실 계산
+                        policy_loss = nn.CrossEntropyLoss()(pred_policies, target_policies)
+                        value_loss = nn.MSELoss()(pred_values, target_values)
+                        total_loss_batch = policy_loss + value_loss
+                        
+                        # 역전파
+                        total_loss_batch.backward()
+                        torch.nn.utils.clip_grad_norm_(self.neural_net.parameters(), 1.0)
+                        self.trainer.optimizer.step()
+                        
+                        total_loss += total_loss_batch.item()
+                        batches += 1
+                        
+                    except Exception as e:
+                        logger.warning(f"배치 훈련 중 오류: {e}")
+                        continue
+            
+            if batches > 0:
+                avg_loss = total_loss / batches
+                logger.info(f"CPU 모델 훈련 완료 - 평균 손실: {avg_loss:.4f}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"CPU 모델 훈련 실패: {e}")
+            return False
 
+            
     def _collect_game_data(self, board, move):
         """게임 데이터 수집 및 학습 트리거"""
         # 현재 보드 상태와 선택한 수를 버퍼에 저장
@@ -1844,18 +1976,9 @@ class UltraStrongAI:
     
 
     def get_move(self, board):
-        """최고의 수 반환 - 통계 문제 해결 버전"""
-        # 통계 변수 강제 초기화
-        if not hasattr(self, 'nodes_searched'):
-            self.nodes_searched = 0
-        if not hasattr(self, 'tt_hits'):
-            self.tt_hits = 0
-        if not hasattr(self, 'cutoffs'):
-            self.cutoffs = 0
-        if not hasattr(self, 'perfect_searches'):
-            self.perfect_searches = 0
-        if not hasattr(self, 'tt_age'):
-            self.tt_age = 0
+        """최고의 수 반환 - 안정화된 버전"""
+        # 안전한 초기화
+        self._ensure_stats_initialized()
         
         # 통계 초기화
         self.nodes_searched = 0
@@ -1864,129 +1987,211 @@ class UltraStrongAI:
         self.perfect_searches = 0
         self.tt_age += 1
         
-        # GPU 보드로 변환 (안전하게)
-        try:
-            gpu_board = self._convert_to_gpu_board(board)
-            if gpu_board is None:
-                logger.error("GPU 보드 변환 실패")
-                return None
-        except Exception as e:
-            logger.error(f"GPU 보드 변환 중 오류: {e}")
-            return None
-        
-        logger.info(f"=== AI 분석 시작 ===")
-        logger.info(f"빈 칸 수: {gpu_board.get_empty_count()}")
-        logger.info(f"현재 플레이어: {'흑' if self.color == BLACK else '백'}")
-        logger.info(f"GPU 백엔드: {getattr(self.gpu, 'backend', 'Unknown')}")
-        logger.info(f"신경망 사용: {self.use_neural_net}")
-        
-        # 현재 보드 상황 로깅
-        try:
-            b, w = gpu_board.count_stones()
-            logger.info(f"현재 점수 - 흑: {b}, 백: {w}")
-        except Exception as e:
-            logger.warning(f"점수 계산 오류: {e}")
-        
-        # 메인 탐색
         start_time = time.time()
-        result = None
-        best_move = None
-        search_stats = {
-            'nodes': 0,
-            'depth': 0,
-            'score': 0,
-            'time_ms': 0,
-            'is_exact': False,
-            'pv': []
-        }
         
         try:
-            if self.use_neural_net and hasattr(self, 'mcts') and self.mcts:
-                logger.info("신경망 기반 MCTS 탐색 시작")
-                best_move, mcts_stats = self.get_move_with_neural_net_enhanced(gpu_board)
-                search_stats.update(mcts_stats)
-            else:
-                logger.info("전통적 알파베타 탐색 시작")
-                result = self.ultra_iterative_deepening(gpu_board)
-                
-                if result and result.best_move:
-                    best_move = result.best_move
-                    search_stats = {
-                        'nodes': getattr(result, 'nodes', 0),
-                        'depth': getattr(result, 'depth', 0),
-                        'score': getattr(result, 'score', 0),
-                        'time_ms': getattr(result, 'time_ms', 0),
-                        'is_exact': getattr(result, 'is_exact', False),
-                        'pv': getattr(result, 'pv', [])
-                    }
+            # GPU 보드로 안전하게 변환
+            gpu_board = self._safe_convert_to_gpu_board(board)
+            if gpu_board is None:
+                return self._emergency_move_selection(board)
+            
+            logger.info(f"=== AI 분석 시작 ===")
+            logger.info(f"빈 칸 수: {gpu_board.get_empty_count()}")
+            logger.info(f"현재 플레이어: {'흑' if self.color == BLACK else '백'}")
+            
+            # 메인 탐색
+            best_move = None
+            search_stats = {'nodes': 0, 'depth': 0, 'score': 0, 'time_ms': 0}
+            
+            try:
+                if self.use_neural_net and self._is_neural_net_ready():
+                    logger.info("신경망 기반 탐색 시작")
+                    best_move, search_stats = self._safe_neural_net_search(gpu_board)
                 else:
-                    logger.error("탐색 결과가 None이거나 best_move가 없습니다")
-                    # 백업 탐색 시도
+                    logger.info("전통적 알파베타 탐색 시작")
+                    best_move, search_stats = self._safe_traditional_search(gpu_board)
+                    
+            except Exception as search_error:
+                logger.error(f"주 탐색 실패: {search_error}")
+                best_move = self._emergency_move_selection(board)
+            
+            # 결과 검증
+            if not self._validate_move(gpu_board, best_move):
+                logger.warning("선택된 수가 유효하지 않음, 대체 수 선택")
+                best_move = self._emergency_move_selection(board)
+            
+            # 통계 출력
+            self._log_search_results(best_move, search_stats, start_time)
+            
+            return best_move
+            
+        except Exception as e:
+            logger.error(f"get_move 전체 실패: {e}")
+            return self._emergency_move_selection(board)
+    
+    def _ensure_stats_initialized(self):
+        """통계 변수 안전 초기화"""
+        required_stats = ['nodes_searched', 'tt_hits', 'cutoffs', 'perfect_searches', 'tt_age']
+        for stat in required_stats:
+            if not hasattr(self, stat):
+                setattr(self, stat, 0)
+    
+    def _safe_convert_to_gpu_board(self, board):
+        """안전한 GPU 보드 변환"""
+        try:
+            if isinstance(board, GPUBoard):
+                return board
+            
+            gpu_board = GPUBoard(self.gpu)
+            
+            # 보드 데이터 복사
+            if hasattr(board, 'board'):
+                if isinstance(board.board, list):
+                    board_array = np.array(board.board, dtype=np.int8)
+                else:
+                    board_array = board.board
+                gpu_board.board = gpu_board.gpu.to_gpu(board_array)
+            
+            # 히스토리 복사
+            if hasattr(board, 'move_history'):
+                gpu_board.move_history = board.move_history.copy()
+            
+            return gpu_board
+            
+        except Exception as e:
+            logger.error(f"GPU 보드 변환 실패: {e}")
+            return None
+    
+    def _is_neural_net_ready(self):
+        """신경망 준비 상태 확인"""
+        return (hasattr(self, 'mcts') and self.mcts is not None and
+                hasattr(self, 'neural_net') and self.neural_net is not None)
+    
+    def _safe_neural_net_search(self, gpu_board):
+        """안전한 신경망 탐색"""
+        try:
+            action_probs = self.mcts.search(gpu_board, self.color)
+            
+            valid_moves = gpu_board.get_valid_moves(self.color)
+            if not valid_moves:
+                return None, {'nodes': 0, 'depth': 0, 'score': 0}
+            
+            # 최고 확률 수 선택
+            best_prob = 0
+            best_move = valid_moves[0]
+            
+            for move in valid_moves:
+                action_idx = move[0] * 8 + move[1]
+                if action_idx < len(action_probs) and action_probs[action_idx] > best_prob:
+                    best_prob = action_probs[action_idx]
+                    best_move = move
+            
+            stats = {
+                'nodes': getattr(self.mcts, 'num_simulations', 800),
+                'depth': 0,  # MCTS는 가변 깊이
+                'score': best_prob,
+                'time_ms': 0
+            }
+            
+            return best_move, stats
+            
+        except Exception as e:
+            logger.error(f"신경망 탐색 실패: {e}")
+            return None, {'nodes': 0, 'depth': 0, 'score': 0}
+    
+    def _safe_traditional_search(self, gpu_board):
+        """안전한 전통적 탐색"""
+        try:
+            result = self.ultra_iterative_deepening(gpu_board)
+            
+            if result and result.best_move:
+                stats = {
+                    'nodes': getattr(result, 'nodes', self.nodes_searched),
+                    'depth': getattr(result, 'depth', 0),
+                    'score': getattr(result, 'score', 0),
+                    'time_ms': getattr(result, 'time_ms', 0)
+                }
+                return result.best_move, stats
+            else:
+                return None, {'nodes': 0, 'depth': 0, 'score': 0}
+                
+        except Exception as e:
+            logger.error(f"전통적 탐색 실패: {e}")
+            return None, {'nodes': 0, 'depth': 0, 'score': 0}
+    
+    def _emergency_move_selection(self, board):
+        """긴급 수 선택 (모든 다른 방법 실패시)"""
+        try:
+            # GPU 보드 시도
+            if hasattr(self, 'gpu') and self.gpu:
+                gpu_board = self._safe_convert_to_gpu_board(board)
+                if gpu_board:
                     valid_moves = gpu_board.get_valid_moves(self.color)
                     if valid_moves:
-                        best_move = valid_moves[0]
-                        logger.warning(f"백업 수 선택: {chr(best_move[1] + ord('a'))}{best_move[0] + 1}")
-                    
-        except Exception as e:
-            logger.error(f"탐색 중 오류 발생: {e}")
-            # 긴급 백업
-            valid_moves = gpu_board.get_valid_moves(self.color)
-            if valid_moves:
-                best_move = valid_moves[0]
-        
-        if not best_move:
-            logger.error("수를 찾지 못했습니다!")
+                        return valid_moves[0]
+            
+            # 일반 보드에서 유효한 수 찾기
+            if hasattr(board, 'get_valid_moves'):
+                valid_moves = board.get_valid_moves(self.color)
+                if valid_moves:
+                    return valid_moves[0]
+            
+            # 마지막 수단: 빈 칸 찾기
+            board_data = getattr(board, 'board', [[0]*8 for _ in range(8)])
+            for i in range(8):
+                for j in range(8):
+                    if board_data[i][j] == 0:  # EMPTY
+                        return (i, j)
+            
+            logger.error("유효한 수를 전혀 찾을 수 없음")
             return None
-        
-        # 상세 통계 출력
-        elapsed_time = time.time() - start_time
-        elapsed_ms = elapsed_time * 1000
-        
-        logger.info(f"=== AI 분석 완료 ===")
-        logger.info(f"최적 수: {chr(best_move[1] + ord('a'))}{best_move[0] + 1}")
-        logger.info(f"평가 점수: {search_stats['score']}")
-        logger.info(f"탐색 깊이: {search_stats['depth']}")
-        logger.info(f"탐색 노드: {search_stats['nodes']:,}개")
-        logger.info(f"소요 시간: {elapsed_ms:.1f}ms ({elapsed_time:.3f}초)")
-        
-        # NPS 계산 (안전하게)
-        if elapsed_time > 0 and search_stats['nodes'] > 0:
-            nps = search_stats['nodes'] / elapsed_time
-            logger.info(f"초당 노드: {nps:,.0f} NPS")
-        else:
-            logger.info("초당 노드: 계산 불가")
-        
-        # TT 통계 (안전하게)
-        if search_stats['nodes'] > 0:
-            tt_hit_rate = (self.tt_hits / search_stats['nodes']) * 100
-            logger.info(f"TT 히트: {self.tt_hits:,}개 ({tt_hit_rate:.1f}%)")
-        else:
-            logger.info(f"TT 히트: {self.tt_hits:,}개")
-        
-        logger.info(f"컷오프: {self.cutoffs:,}개")
-        logger.info(f"완전 탐색: {self.perfect_searches}회")
-        logger.info(f"정확도: {'완전' if search_stats['is_exact'] else '근사'}")
-        
-        # PV (주요 변화) 출력
-        if search_stats['pv'] and len(search_stats['pv']) > 1:
-            try:
-                pv_str = " ".join([f"{chr(move[1] + ord('a'))}{move[0] + 1}" 
-                                for move in search_stats['pv'][:5] if move])
-                logger.info(f"주요 변화: {pv_str}")
-            except Exception as e:
-                logger.warning(f"PV 출력 오류: {e}")
-        
-        # 메모리 사용량 로깅
-        if hasattr(self, 'tt'):
-            logger.info(f"TT 크기: {len(self.tt):,}개 엔트리")
-        
-        # GPU 메모리 상태
-        if hasattr(self, 'gpu') and getattr(self.gpu, 'gpu_available', False):
-            logger.info(f"GPU 메모리 정리 완료")
-        
-        logger.info("=" * 40)
-        
-        return best_move
+            
+        except Exception as e:
+            logger.error(f"긴급 수 선택도 실패: {e}")
+            return None
+    
+    def _validate_move(self, gpu_board, move):
+        """수 유효성 검증"""
+        try:
+            if not move or len(move) != 2:
+                return False
+            
+            x, y = move
+            if not (0 <= x < 8 and 0 <= y < 8):
+                return False
+            
+            return gpu_board.is_valid_move(x, y, self.color)
+            
+        except Exception as e:
+            logger.debug(f"수 검증 실패: {e}")
+            return False
+    
+    def _log_search_results(self, best_move, search_stats, start_time):
+        """탐색 결과 로깅"""
+        try:
+            elapsed_time = time.time() - start_time
+            elapsed_ms = elapsed_time * 1000
+            
+            logger.info(f"=== AI 분석 완료 ===")
+            if best_move:
+                logger.info(f"최적 수: {chr(best_move[1] + ord('a'))}{best_move[0] + 1}")
+            else:
+                logger.info("최적 수: 없음")
+            
+            logger.info(f"평가 점수: {search_stats['score']}")
+            logger.info(f"탐색 깊이: {search_stats['depth']}")
+            logger.info(f"탐색 노드: {search_stats['nodes']:,}개")
+            logger.info(f"소요 시간: {elapsed_ms:.1f}ms")
+            
+            # NPS 계산
+            if elapsed_time > 0 and search_stats['nodes'] > 0:
+                nps = search_stats['nodes'] / elapsed_time
+                logger.info(f"초당 노드: {nps:,.0f} NPS")
+            
+            logger.info("=" * 40)
+            
+        except Exception as e:
+            logger.debug(f"결과 로깅 실패: {e}")
 
 
     def get_move_with_neural_net_enhanced(self, gpu_board):
