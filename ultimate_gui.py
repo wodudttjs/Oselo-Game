@@ -100,7 +100,7 @@ class UltimateOthelloGUI:
                 font=("Arial", 10, "bold"), fg="white", bg="#16213e").pack(side=tk.LEFT, padx=5)
         self.time_limit_var = tk.StringVar(value="5.0")
         time_limit_combo = ttk.Combobox(control_frame, textvariable=self.time_limit_var,
-                                       values=["1.0", "3.0", "5.0", "10.0", "30.0"], 
+                                       values=["1.0", "3.0", "5.0", "10.0", "30.0", "60.0", "120.0", "300.0"], 
                                        width=6, font=("Arial", 10))
         time_limit_combo.pack(side=tk.LEFT, padx=5)
         
