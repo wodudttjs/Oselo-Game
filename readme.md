@@ -1,9 +1,14 @@
-main -> 기존 메인
+gpu_ultimate_main --> 이거 실행 ㄱ
 
-enhanced_main -> Egaroucid ai 업데이트(https://github.com/Nyanyan/Egaroucid)
 
-ultimate_main -> gui 업데이트 및 ai 업데이트 (Error in depth 1: 'dict' object has no attribute 'best_move' 수정해야함)
+logs\ai_sessions\info --> 이거 로그만 보면 됩니다
 
-update_main -> 한국어 업데이트한 메인
+gpu 세팅해둬도 cuda 없으면 numba로 넘어가고 안되면 cpu로 넘어감
 
-4가지 버전다 실행할 수 있음 
+알고리즘 알파베타랑 신경망으로 하는거 나눠놓음 
+
+시간 많을 때는 오프닝 북 끄고 실행하기 
+
+gpu사용시 깊이 20 설정해도 10초 안에 해줌 
+
+세팅하고 뉴게임 눌러야지 세팅이 됨 --> 퍼포먼스 눌러서 확인ㄱ
