@@ -3,17 +3,24 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 import time
-
 from collections import deque
-
-
 import logging
 import os
+import datetime
+from datetime import datetime
 
 def setup_training_logger():
-    """Training Pipeline 전용 로거 설정"""
-    log_dir = "logs"
+    """세션별 Training Pipeline 로거 설정"""
+    log_dir = "logs/training"
     os.makedirs(log_dir, exist_ok=True)
+    
+    # 세션별 고유 타임스탬프
+    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id = f"session_{session_timestamp}"
+    
+    # 로그 파일명 생성
+    log_filename = f"Training_{session_id}.log"
+    log_filepath = os.path.join(log_dir, log_filename)
     
     logger = logging.getLogger('TrainingPipeline')
     logger.setLevel(logging.INFO)
@@ -22,12 +29,8 @@ def setup_training_logger():
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     
-    # 파일 핸들러만 추가
-    file_handler = logging.FileHandler(
-        os.path.join(log_dir, 'training_pipeline.log'),
-        mode='a',
-        encoding='utf-8'
-    )
+    # 파일 핸들러만 추가 (새 파일)
+    file_handler = logging.FileHandler(log_filepath, mode='w', encoding='utf-8')
     
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
@@ -36,11 +39,16 @@ def setup_training_logger():
     logger.addHandler(file_handler)
     
     logger.propagate = False
+    
+    # 세션 시작 로그
+    logger.info("=" * 60)
+    logger.info(f"🎓 TRAINING SESSION STARTED: {session_id}")
+    logger.info(f"📁 Log File: {log_filepath}")
+    logger.info("=" * 60)
+    
     return logger
 
 logger = setup_training_logger()
-# 로거 설정
-
 
 # 안전한 GPU 모듈 import
 try:
@@ -80,41 +88,42 @@ class TrainingPipeline:
         
         logger.info(f"훈련 파이프라인 초기화 완료 (디바이스: {self.device})")
 
-
     def _safe_initialize_trainer(self):
-            """안전한 트레이너 초기화"""
-            self.gpu_available = False
-            
-            try:
-                if (GPU_MODULES_AVAILABLE and 
-                    torch.cuda.is_available() and 
-                    GPUManager and GPUOthelloNet and GPUSelfPlayTrainer):
-                    
-                    # GPU 트레이너 사용
-                    self.gpu_manager = GPUManager()
-                    if self.gpu_manager.gpu_available:
-                        self.neural_net = GPUOthelloNet().to(self.device)
-                        self.trainer = GPUSelfPlayTrainer(self.neural_net, self.gpu_manager)
-                        self.gpu_available = True
-                        logger.info("GPU 트레이너 초기화 완료")
-                    else:
-                        raise RuntimeError("GPU 매니저가 GPU를 사용할 수 없다고 보고")
-            except Exception as e:
-                logger.warning(f"GPU 트레이너 초기화 실패: {e}")
+        """안전한 트레이너 초기화"""
+        self.gpu_available = False
+        
+        try:
+            if (GPU_MODULES_AVAILABLE and 
+                torch.cuda.is_available() and 
+                GPUManager and GPUOthelloNet and GPUSelfPlayTrainer):
                 
-            # GPU 실패시 CPU 백업
-            if not self.gpu_available:
-                try:
-                    self.neural_net = self._create_simple_neural_net()
-                    self.optimizer = optim.Adam(self.neural_net.parameters(), lr=0.001)
-                    self.loss_fn = nn.MSELoss()
-                    logger.info("CPU 트레이너로 초기화 완료")
-                except Exception as e:
-                    logger.error(f"CPU 트레이너 초기화도 실패: {e}")
-                    # 최소한의 더미 구현
-                    self.neural_net = None
-                    self.optimizer = None
-                    self.loss_fn = None
+                # GPU 트레이너 사용
+                self.gpu_manager = GPUManager()
+                if self.gpu_manager.gpu_available:
+                    self.neural_net = GPUOthelloNet().to(self.device)
+                    self.trainer = GPUSelfPlayTrainer(self.neural_net, self.gpu_manager)
+                    self.gpu_available = True
+                    logger.info("GPU 트레이너 초기화 완료")
+                else:
+                    raise RuntimeError("GPU 매니저가 GPU를 사용할 수 없다고 보고")
+        except Exception as e:
+            logger.warning(f"GPU 트레이너 초기화 실패: {e}")
+            
+        # GPU 실패시 CPU 백업
+        if not self.gpu_available:
+            try:
+                self.neural_net = self._create_simple_neural_net()
+                self.optimizer = optim.Adam(self.neural_net.parameters(), lr=0.001)
+                self.loss_fn = nn.MSELoss()
+                self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.9)
+                logger.info("CPU 트레이너로 초기화 완료")
+            except Exception as e:
+                logger.error(f"CPU 트레이너 초기화도 실패: {e}")
+                # 최소한의 더미 구현
+                self.neural_net = None
+                self.optimizer = None
+                self.loss_fn = None
+                self.scheduler = None
 
     def _create_simple_neural_net(self):
         """간단한 신경망 생성 (GPU 모듈이 없을 때 사용)"""
@@ -194,80 +203,119 @@ class TrainingPipeline:
         
         return safe_post_game_callback
     
-    def _train_neural_network(self):
-        """신경망 훈련 실행"""
-        if len(self.training_data) < 32:
-            return
+    def safe_convert_game_data(self, game_data):
+        """안전한 게임 데이터 변환 - 강화된 버전"""
+        try:
+            training_data = []
             
-        if self.gpu_available and hasattr(self.trainer, 'train_neural_net'):
-            # GPU 트레이너 사용
-            self.trainer.train_neural_net(batch_size=32, epochs=2)
-        else:
-            # CPU 트레이너 사용
-            self._train_cpu_model()
-
-    def _train_cpu_model(self):
-        """CPU 모델 훈련"""
-        batch_size = 16
-        epochs = 2
-        
-        # 훈련 데이터 샘플링
-        sample_size = min(len(self.training_data), 1000)
-        sample_data = list(self.training_data)[-sample_size:]
-        
-        for epoch in range(epochs):
-            total_loss = 0
-            batches = 0
-            
-            for i in range(0, len(sample_data), batch_size):
-                batch = sample_data[i:i+batch_size]
-                if len(batch) < batch_size:
-                    continue
-                
+            for data in game_data:
                 try:
-                    # 배치 데이터 준비
-                    boards = torch.stack([item[0] for item in batch]).to(self.device)
+                    # 데이터 유효성 검사
+                    if not isinstance(data, dict):
+                        continue
+                        
+                    # 필수 키 확인
+                    required_keys = ['board', 'move', 'color']
+                    if not all(key in data for key in required_keys):
+                        continue
                     
-                    # 정책 타겟을 원핫 벡터에서 클래스 인덱스로 변환
-                    policy_targets = []
-                    for item in batch:
-                        action_probs = item[1]
-                        if isinstance(action_probs, np.ndarray):
-                            target_idx = np.argmax(action_probs)
-                        else:
-                            target_idx = action_probs
-                        policy_targets.append(target_idx)
+                    # 보드 상태를 텐서로 변환
+                    board_tensor = self.safe_board_to_tensor(data.get('board'), data.get('color'))
                     
-                    target_policies = torch.tensor(policy_targets, dtype=torch.long).to(self.device)
-                    target_values = torch.tensor([item[2] for item in batch], dtype=torch.float32).unsqueeze(1).to(self.device)
-                    
-                    # 순전파
-                    self.optimizer.zero_grad()
-                    pred_policies, pred_values = self.neural_net(boards)
-                    
-                    # 손실 계산
-                    policy_loss = nn.CrossEntropyLoss()(pred_policies, target_policies)
-                    value_loss = self.loss_fn(pred_values, target_values)
-                    total_loss_batch = policy_loss + value_loss
-                    
-                    # 역전파
-                    total_loss_batch.backward()
-                    torch.nn.utils.clip_grad_norm_(self.neural_net.parameters(), 1.0)
-                    self.optimizer.step()
-                    
-                    total_loss += total_loss_batch.item()
-                    batches += 1
-                    
+                    if board_tensor is not None:
+                        # 정책 (실제 수를 인덱스로)
+                        move = data.get('move')
+                        if move and len(move) >= 2:
+                            x, y = move[0], move[1]
+                            # 좌표 유효성 검사
+                            if 0 <= x < 8 and 0 <= y < 8:
+                                move_idx = x * 8 + y
+                                value = float(data.get('value', 0.0))
+                                # 값 범위 제한
+                                value = max(-1.0, min(1.0, value))
+                                training_data.append((board_tensor, move_idx, value))
+                        
                 except Exception as e:
-                    logger.warning(f"배치 훈련 중 오류: {e}")
+                    logger.debug(f"개별 데이터 변환 오류: {e}")
                     continue
             
-            if batches > 0:
-                avg_loss = total_loss / batches
-                logger.info(f"Epoch {epoch+1}/{epochs}, 평균 손실: {avg_loss:.4f}")
+            logger.debug(f"변환된 훈련 데이터: {len(training_data)}개")
+            return training_data
+            
+        except Exception as e:
+            logger.error(f"게임 데이터 변환 실패: {e}")
+            return []
 
+    def safe_board_to_tensor(self, board_array, color):
+        """안전한 보드 텐서 변환 - 강화된 버전"""
+        try:
+            if not board_array or not color:
+                return None
+            
+            # 보드 배열 유효성 검사
+            if not isinstance(board_array, (list, np.ndarray)):
+                return None
+            
+            # 8x8 크기 확인
+            if len(board_array) != 8:
+                return None
+                
+            tensor = torch.zeros(3, 8, 8, dtype=torch.float32)
+            
+            for i in range(8):
+                if not isinstance(board_array[i], (list, np.ndarray)) or len(board_array[i]) != 8:
+                    continue
+                    
+                for j in range(8):
+                    try:
+                        cell_value = board_array[i][j]
+                        
+                        # 셀 값 유효성 검사
+                        if cell_value == color:
+                            tensor[0][i][j] = 1.0
+                        elif cell_value != 0 and cell_value != color:  # 상대방 돌
+                            tensor[1][i][j] = 1.0
+                    except (IndexError, TypeError, ValueError):
+                        continue
+            
+            # 현재 플레이어 정보
+            if color == BLACK:
+                tensor[2] = torch.ones(8, 8)
+            
+            return tensor
+            
+        except Exception as e:
+            logger.debug(f"보드 텐서 변환 오류: {e}")
+            return None
+    
+    def _safe_train_neural_network(self):
+        """안전한 신경망 훈련"""
+        try:
+            if len(self.training_data) < 32:
+                logger.debug("훈련 데이터 부족")
+                return False
+                
+            if self.gpu_available and hasattr(self.trainer, 'train_neural_net'):
+                # GPU 트레이너 사용
+                try:
+                    self.trainer.train_neural_net(batch_size=32, epochs=2)
+                    return True
+                except Exception as e:
+                    logger.error(f"GPU 훈련 실패: {e}")
+                    return False
+            elif self.neural_net and self.optimizer:
+                # CPU 트레이너 사용
+                return self._safe_train_cpu_model()
+            else:
+                logger.warning("훈련 가능한 모델이 없습니다")
+                return False
+                
+        except Exception as e:
+            logger.error(f"신경망 훈련 실패: {e}")
+            return False
+    
     def _safe_train_cpu_model(self):
-        """안전한 CPU 모델 훈련"""
+        """안전한 CPU 모델 훈련 - 개선된 버전"""
         try:
             if not self.neural_net or not self.optimizer or len(self.training_data) < 16:
                 return False
@@ -283,9 +331,12 @@ class TrainingPipeline:
             batches = 0
             
             for epoch in range(epochs):
+                epoch_loss = 0
+                epoch_batches = 0
+                
                 for i in range(0, len(sample_data), batch_size):
                     batch = sample_data[i:i+batch_size]
-                    if len(batch) < batch_size:
+                    if len(batch) < batch_size // 2:  # 최소 절반은 유효해야 함
                         continue
                     
                     try:
@@ -296,145 +347,77 @@ class TrainingPipeline:
                         
                         for item in batch:
                             try:
-                                boards.append(item[0])
-                                policies.append(item[1])
-                                values.append(item[2])
-                            except (IndexError, KeyError, TypeError):
+                                if len(item) >= 3:
+                                    boards.append(item[0])
+                                    policies.append(item[1])
+                                    values.append(item[2])
+                            except (IndexError, TypeError):
                                 continue
                         
-                        if len(boards) < batch_size // 2:  # 최소 절반은 유효해야 함
+                        if len(boards) < batch_size // 4:  # 최소 1/4은 유효해야 함
                             continue
                         
                         # 텐서 변환
-                        boards_tensor = torch.stack(boards).to(self.device)
-                        policies_tensor = torch.tensor(policies, dtype=torch.long).to(self.device)
-                        values_tensor = torch.tensor(values, dtype=torch.float32).unsqueeze(1).to(self.device)
+                        boards_tensor = torch.stack(boards[:len(boards)]).to(self.device)
+                        
+                        # 정책을 원핫에서 클래스 인덱스로 변환
+                        policy_indices = []
+                        for p in policies[:len(boards)]:
+                            if isinstance(p, (int, np.integer)):
+                                # 이미 인덱스인 경우
+                                policy_indices.append(min(63, max(0, int(p))))
+                            elif isinstance(p, (list, np.ndarray)):
+                                # 원핫 벡터인 경우
+                                try:
+                                    idx = np.argmax(p) if len(p) > 0 else 0
+                                    policy_indices.append(min(63, max(0, int(idx))))
+                                except:
+                                    policy_indices.append(0)
+                            else:
+                                policy_indices.append(0)
+                        
+                        policies_tensor = torch.tensor(policy_indices, dtype=torch.long).to(self.device)
+                        values_tensor = torch.tensor(values[:len(boards)], dtype=torch.float32).unsqueeze(1).to(self.device)
                         
                         # 훈련 단계
                         self.optimizer.zero_grad()
                         pred_policies, pred_values = self.neural_net(boards_tensor)
                         
+                        # 손실 계산
                         policy_loss = nn.CrossEntropyLoss()(pred_policies, policies_tensor)
                         value_loss = self.loss_fn(pred_values, values_tensor)
                         total_loss_batch = policy_loss + value_loss
                         
+                        # 역전파
                         total_loss_batch.backward()
                         torch.nn.utils.clip_grad_norm_(self.neural_net.parameters(), 1.0)
                         self.optimizer.step()
                         
-                        total_loss += total_loss_batch.item()
-                        batches += 1
+                        epoch_loss += total_loss_batch.item()
+                        epoch_batches += 1
                         
                     except Exception as batch_error:
                         logger.debug(f"배치 처리 오류: {batch_error}")
                         continue
+                
+                if epoch_batches > 0:
+                    total_loss += epoch_loss / epoch_batches
+                    batches += 1
+                    logger.debug(f"Epoch {epoch+1}/{epochs}, 배치: {epoch_batches}, 평균 손실: {epoch_loss/epoch_batches:.4f}")
+            
+            # 스케줄러 업데이트
+            if self.scheduler:
+                self.scheduler.step()
             
             if batches > 0:
                 avg_loss = total_loss / batches
-                logger.info(f"훈련 완료 - 평균 손실: {avg_loss:.4f}")
+                logger.info(f"CPU 모델 훈련 완료 - 평균 손실: {avg_loss:.4f}")
                 return True
             
             return False
             
         except Exception as e:
             logger.error(f"CPU 모델 훈련 실패: {e}")
-            return False
-        
-    def safe_convert_game_data(self, game_data):
-        """안전한 게임 데이터 변환"""
-        try:
-            training_data = []
-            
-            for data in game_data:
-                try:
-                    # 보드 상태를 텐서로 변환
-                    board_tensor = self.safe_board_to_tensor(data.get('board'), data.get('color'))
-                    
-                    if board_tensor is not None:
-                        # 정책 (실제 수를 인덱스로)
-                        move = data.get('move')
-                        if move and len(move) >= 2:
-                            move_idx = move[0] * 8 + move[1]
-                            value = float(data.get('value', 0.0))
-                            training_data.append((board_tensor, move_idx, value))
-                        
-                except Exception as e:
-                    logger.debug(f"개별 데이터 변환 오류: {e}")
-                    continue
-            
-            return training_data
-            
-        except Exception as e:
-            logger.error(f"게임 데이터 변환 실패: {e}")
-            return []
-
-    def safe_board_to_tensor(self, board_array, color):
-            """안전한 보드 텐서 변환"""
-            try:
-                if not board_array or not color:
-                    return None
-                    
-                tensor = torch.zeros(3, 8, 8, dtype=torch.float32)
-                
-                for i in range(8):
-                    for j in range(8):
-                        try:
-                            if isinstance(board_array[i], list):
-                                cell_value = board_array[i][j]
-                            else:
-                                cell_value = board_array[i][j]
-                            
-                            if cell_value == color:
-                                tensor[0][i][j] = 1.0
-                            elif cell_value != 0:  # 상대방 돌
-                                tensor[1][i][j] = 1.0
-                        except (IndexError, TypeError):
-                            continue
-                
-                # 현재 플레이어 정보
-                if color == BLACK:
-                    tensor[2] = torch.ones(8, 8)
-                
-                return tensor
-                
-            except Exception as e:
-                logger.debug(f"보드 텐서 변환 오류: {e}")
-                return None
-            
-
-    def _save_model(self, model_path):
-        """모델 저장"""
-        try:
-            if self.gpu_available and hasattr(self.trainer, 'save_model'):
-                self.trainer.save_model(model_path)
-            else:
-                torch.save({
-                    'model_state_dict': self.neural_net.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
-                    'game_counter': self.game_counter
-                }, model_path)
-        except Exception as e:
-            logger.error(f"모델 저장 실패: {e}")
-
-    def _safe_train_neural_network(self):
-        """안전한 신경망 훈련"""
-        try:
-            if len(self.training_data) < 32:
-                return False
-                
-            if self.gpu_available and hasattr(self.trainer, 'train_neural_net'):
-                # GPU 트레이너 사용
-                self.trainer.train_neural_net(batch_size=32, epochs=2)
-                return True
-            elif self.neural_net and self.optimizer:
-                # CPU 트레이너 사용
-                return self._safe_train_cpu_model()
-            else:
-                logger.warning("훈련 가능한 모델이 없습니다")
-                return False
-                
-        except Exception as e:
-            logger.error(f"신경망 훈련 실패: {e}")
             return False
     
     def _safe_save_model(self, model_path):
@@ -444,11 +427,18 @@ class TrainingPipeline:
                 self.trainer.save_model(model_path)
                 return True
             elif self.neural_net and self.optimizer:
-                torch.save({
+                checkpoint = {
                     'model_state_dict': self.neural_net.state_dict(),
-                    'optimizer_state_dict': self.optimizer.state_dict(),
                     'game_counter': self.game_counter
-                }, model_path)
+                }
+                
+                if self.optimizer:
+                    checkpoint['optimizer_state_dict'] = self.optimizer.state_dict()
+                    
+                if hasattr(self, 'scheduler') and self.scheduler:
+                    checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
+                
+                torch.save(checkpoint, model_path)
                 return True
             else:
                 logger.warning("저장할 모델이 없습니다")
@@ -459,21 +449,94 @@ class TrainingPipeline:
             return False
 
     def load_model(self, model_path):
-        """모델 로드"""
+        """모델 로드 - 개선된 버전"""
         try:
-            if os.path.exists(model_path):
-                if self.gpu_available and hasattr(self.trainer, 'load_model'):
-                    return self.trainer.load_model(model_path)
-                else:
-                    checkpoint = torch.load(model_path, map_location=self.device)
+            if not os.path.exists(model_path):
+                logger.warning(f"모델 파일이 존재하지 않습니다: {model_path}")
+                return False
+                
+            if self.gpu_available and hasattr(self.trainer, 'load_model'):
+                return self.trainer.load_model(model_path)
+            elif self.neural_net:
+                checkpoint = torch.load(model_path, map_location=self.device)
+                
+                # 모델 상태 로드
+                if 'model_state_dict' in checkpoint:
                     self.neural_net.load_state_dict(checkpoint['model_state_dict'])
-                    self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                    self.game_counter = checkpoint.get('game_counter', 0)
-                    logger.info(f"모델 로드 완료: {model_path}")
-                    return True
+                
+                # 옵티마이저 상태 로드
+                if self.optimizer and 'optimizer_state_dict' in checkpoint:
+                    try:
+                        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    except Exception as e:
+                        logger.warning(f"옵티마이저 상태 로드 실패: {e}")
+                
+                # 스케줄러 상태 로드
+                if (hasattr(self, 'scheduler') and self.scheduler and 
+                    'scheduler_state_dict' in checkpoint):
+                    try:
+                        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+                    except Exception as e:
+                        logger.warning(f"스케줄러 상태 로드 실패: {e}")
+                
+                # 게임 카운터 로드
+                self.game_counter = checkpoint.get('game_counter', 0)
+                
+                logger.info(f"모델 로드 완료: {model_path}")
+                return True
+            else:
+                logger.error("로드할 모델이 초기화되지 않았습니다")
+                return False
+                
         except Exception as e:
             logger.error(f"모델 로드 실패: {e}")
-        return False
+            return False
+    
+    def get_training_stats(self):
+        """훈련 통계 반환"""
+        stats = {
+            'game_counter': self.game_counter,
+            'training_data_size': len(self.training_data),
+            'gpu_available': self.gpu_available,
+            'device': str(self.device)
+        }
+        
+        if self.gpu_available and hasattr(self.trainer, 'training_stats'):
+            stats.update(self.trainer.training_stats)
+        
+        return stats
+    
+    def manual_training_step(self, num_epochs=5, batch_size=32):
+        """수동 훈련 단계 실행"""
+        logger.info(f"수동 훈련 시작: {num_epochs} epochs, batch_size={batch_size}")
+        
+        if len(self.training_data) < batch_size:
+            logger.warning(f"훈련 데이터 부족: {len(self.training_data)} < {batch_size}")
+            return False
+        
+        try:
+            if self.gpu_available and hasattr(self.trainer, 'train_neural_net'):
+                self.trainer.train_neural_net(batch_size=batch_size, epochs=num_epochs)
+                return True
+            elif self.neural_net and self.optimizer:
+                # CPU 훈련 실행
+                return self._safe_train_cpu_model()
+            else:
+                logger.error("훈련 가능한 모델이 없습니다")
+                return False
+                
+        except Exception as e:
+            logger.error(f"수동 훈련 실패: {e}")
+            return False
+    
+    def cleanup(self):
+        """리소스 정리"""
+        try:
+            if self.gpu_available and hasattr(self, 'gpu_manager'):
+                self.gpu_manager.clear_memory()
+                logger.info("GPU 메모리 정리 완료")
+        except Exception as e:
+            logger.debug(f"정리 중 오류: {e}")
 
 def main():
     """메인 실행 함수"""

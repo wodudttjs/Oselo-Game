@@ -14,84 +14,293 @@ import time
 import threading
 from pathlib import Path
 
-# GPU 지원 확인 및 로깅 설정
 def setup_main_logging():
-    """메인 애플리케이션 로깅 설정"""
-    log_dir = Path("logs")
-    log_dir.mkdir(exist_ok=True)
+    """메인 애플리케이션 세션별 로깅 설정 - 수정된 버전"""
+    from datetime import datetime
+    from pathlib import Path
+    import os
+    import logging
     
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"othello_gpu_ai_{timestamp}.log"
+    # logs/main 디렉토리 생성 (parents=True로 상위 디렉토리도 함께 생성)
+    log_dir = Path("logs") / "main"
+    log_dir.mkdir(parents=True, exist_ok=True)
     
+    # 세션별 고유 타임스탬프 및 ID 생성
+    session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_id = f"session_{session_timestamp}"
+    
+    # 다양한 로그 파일 생성
+    main_log_file = log_dir / f"Main_{session_id}.log"
+    error_log_file = log_dir / f"Errors_{session_id}.log"
+    
+    # 기존 로깅 설정 초기화 (중복 방지)
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+    
+    # 기본 로깅 설정
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s',
         handlers=[
-            logging.FileHandler(log_file, encoding='utf-8'),
-            logging.StreamHandler()
-        ]
+            logging.FileHandler(main_log_file, mode='w', encoding='utf-8'),
+            logging.StreamHandler()  # 콘솔 출력
+        ],
+        force=True  # 기존 설정 강제 덮어쓰기
     )
     
+    # 에러 전용 로거 설정
+    error_logger = logging.getLogger('ErrorLogger')
+    # 기존 핸들러 제거
+    for handler in error_logger.handlers[:]:
+        error_logger.removeHandler(handler)
+    
+    error_handler = logging.FileHandler(error_log_file, mode='w', encoding='utf-8')
+    error_handler.setLevel(logging.ERROR)
+    error_formatter = logging.Formatter(
+        '%(asctime)s - ERROR - [%(filename)s:%(lineno)d] - %(funcName)s - %(message)s'
+    )
+    error_handler.setFormatter(error_formatter)
+    error_logger.addHandler(error_handler)
+    error_logger.propagate = False
+    
+    # 메인 로거 생성
     logger = logging.getLogger('OthelloGPUMain')
-    logger.info("=" * 60)
-    logger.info("🚀 GPU Enhanced Ultimate Othello AI Starting")
-    logger.info("=" * 60)
+    
+    # 로그 파일 생성 확인
+    print(f"📁 Log directory created: {log_dir}")
+    print(f"📄 Main log file: {main_log_file}")
+    print(f"🚨 Error log file: {error_log_file}")
+    
+    # 세션 시작 정보 로깅
+    logger.info("=" * 80)
+    logger.info("🚀 ULTIMATE OTHELLO AI - NEW SESSION")
+    logger.info("=" * 80)
+    logger.info(f"📅 Session ID: {session_id}")
+    logger.info(f"🕒 Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"📁 Main Log: {main_log_file}")
+    logger.info(f"🚨 Error Log: {error_log_file}")
+    logger.info(f"💻 Platform: {os.name}")
+    
+    # 시스템 정보 로깅
+    try:
+        import platform
+        import sys
+        logger.info(f"🐍 Python: {sys.version}")
+        logger.info(f"🖥️ System: {platform.system()} {platform.release()}")
+        logger.info(f"🏗️ Architecture: {platform.architecture()[0]}")
+    except Exception as e:
+        logger.warning(f"System info logging failed: {e}")
+    
+    logger.info("=" * 80)
+    
     return logger
 
 # 메인 로거 초기화
 main_logger = setup_main_logging()
 
+
 def check_gpu_support():
-    """GPU 지원 여부 확인 및 정보 출력"""
+    """GPU 지원 여부 확인 및 정보 출력 - 향상된 버전"""
     gpu_info = {
         'cupy_available': False,
         'numba_available': False,
         'cuda_devices': 0,
         'gpu_memory': 0,
-        'recommended_backend': 'cpu'
+        'recommended_backend': 'cpu',
+        'error_details': [],
+        'cuda_version': 'Unknown'
     }
     
-    main_logger.info("🔍 Checking GPU support...")
+    main_logger.info("🔍 GPU 지원 상태 확인 중...")
     
-    # CuPy 확인
+    # CuPy 상세 확인
+    main_logger.info("1️⃣ CuPy 확인 중...")
     try:
         import cupy as cp
-        gpu_info['cupy_available'] = True
+        
+        # 기본 정보 수집
         gpu_info['cuda_devices'] = cp.cuda.runtime.getDeviceCount()
+        main_logger.info(f"   CUDA 디바이스 발견: {gpu_info['cuda_devices']}개")
+        
         if gpu_info['cuda_devices'] > 0:
+            # 디바이스 상세 정보
             device = cp.cuda.Device(0)
+            props = cp.cuda.runtime.getDeviceProperties(0)
             gpu_info['gpu_memory'] = device.mem_info[1] // (1024**3)  # GB
-            gpu_info['recommended_backend'] = 'cupy'
-        main_logger.info(f"✅ CuPy available: {gpu_info['cuda_devices']} CUDA devices")
-        main_logger.info(f"📊 GPU Memory: {gpu_info['gpu_memory']} GB")
-    except ImportError:
-        main_logger.warning("⚠️ CuPy not available")
+            gpu_info['device_name'] = props['name'].decode()
+            
+            main_logger.info(f"   GPU 0: {gpu_info['device_name']}")
+            main_logger.info(f"   GPU 메모리: {gpu_info['gpu_memory']} GB")
+            
+            # CUDA 버전 확인
+            try:
+                cuda_version = cp.cuda.runtime.runtimeGetVersion()
+                gpu_info['cuda_version'] = f"{cuda_version // 1000}.{(cuda_version % 1000) // 10}"
+                main_logger.info(f"   CUDA 런타임 버전: {gpu_info['cuda_version']}")
+            except Exception as cuda_ver_error:
+                gpu_info['error_details'].append(f"CUDA 버전 확인 실패: {cuda_ver_error}")
+            
+            # 실제 GPU 연산 테스트
+            main_logger.info("   GPU 연산 테스트 중...")
+            try:
+                test_array = cp.array([1.0, 2.0, 3.0])
+                result = cp.sum(test_array)
+                cpu_result = result.get()
+                
+                if abs(cpu_result - 6.0) < 1e-6:
+                    gpu_info['cupy_available'] = True
+                    gpu_info['recommended_backend'] = 'cupy'
+                    main_logger.info("   ✅ CuPy GPU 연산 테스트 성공!")
+                else:
+                    raise RuntimeError(f"연산 결과 불일치: {cpu_result} != 6.0")
+                    
+            except Exception as compute_error:
+                error_msg = f"CuPy 연산 테스트 실패: {compute_error}"
+                gpu_info['error_details'].append(error_msg)
+                main_logger.warning(f"   ❌ {error_msg}")
+        else:
+            gpu_info['error_details'].append("CUDA 디바이스를 찾을 수 없음")
+            main_logger.warning("   ❌ CUDA 디바이스를 찾을 수 없습니다")
+            
+    except ImportError as import_error:
+        error_msg = f"CuPy 모듈 import 실패: {import_error}"
+        gpu_info['error_details'].append(error_msg)
+        main_logger.warning(f"   ❌ {error_msg}")
     except Exception as e:
-        main_logger.warning(f"⚠️ CuPy error: {e}")
+        error_msg = f"CuPy 초기화 실패: {e}"
+        gpu_info['error_details'].append(error_msg)
+        main_logger.warning(f"   ❌ {error_msg}")
     
     # Numba CUDA 확인
+    main_logger.info("2️⃣ Numba CUDA 확인 중...")
     try:
         from numba import cuda
+        
         if cuda.is_available():
-            gpu_info['numba_available'] = True
-            if not gpu_info['cupy_available']:
-                gpu_info['recommended_backend'] = 'numba'
-            main_logger.info("✅ Numba CUDA available")
+            detected = cuda.detect()
+            main_logger.info(f"   Numba가 감지한 CUDA 디바이스: {detected.count}개")
+            
+            try:
+                # Numba 컨텍스트 테스트
+                ctx = cuda.current_context()
+                device_name = ctx.device.name.decode()
+                main_logger.info(f"   현재 디바이스: {device_name}")
+                
+                gpu_info['numba_available'] = True
+                if not gpu_info['cupy_available']:
+                    gpu_info['recommended_backend'] = 'numba'
+                    
+                main_logger.info("   ✅ Numba CUDA 사용 가능!")
+                
+            except Exception as numba_ctx_error:
+                error_msg = f"Numba 컨텍스트 오류: {numba_ctx_error}"
+                gpu_info['error_details'].append(error_msg)
+                main_logger.warning(f"   ❌ {error_msg}")
         else:
-            main_logger.warning("⚠️ Numba CUDA not available")
-    except ImportError:
-        main_logger.warning("⚠️ Numba not available")
-    except Exception as e:
-        main_logger.warning(f"⚠️ Numba error: {e}")
+            error_msg = "Numba에서 CUDA를 사용할 수 없음"
+            gpu_info['error_details'].append(error_msg)
+            main_logger.warning(f"   ❌ {error_msg}")
+            
+    except ImportError as numba_import_error:
+        error_msg = f"Numba 모듈 import 실패: {numba_import_error}"
+        gpu_info['error_details'].append(error_msg)
+        main_logger.warning(f"   ❌ {error_msg}")
+    except Exception as numba_error:
+        error_msg = f"Numba 초기화 실패: {numba_error}"
+        gpu_info['error_details'].append(error_msg)
+        main_logger.warning(f"   ❌ {error_msg}")
     
-    # 최종 추천
-    if gpu_info['cupy_available'] or gpu_info['numba_available']:
-        main_logger.info(f"🚀 Recommended backend: {gpu_info['recommended_backend']}")
+    # 최종 추천 및 요약
+    main_logger.info("📊 GPU 지원 상태 요약:")
+    if gpu_info['cupy_available']:
+        main_logger.info(f"🚀 추천 백엔드: CuPy (CUDA {gpu_info['cuda_version']})")
+        main_logger.info(f"💾 GPU 메모리: {gpu_info['gpu_memory']} GB")
+        main_logger.info("⚡ 성능: 최고 (GPU 가속 + 고급 메모리 관리)")
+    elif gpu_info['numba_available']:
+        main_logger.info("🔥 추천 백엔드: Numba CUDA")
+        main_logger.info("⚡ 성능: 우수 (GPU 가속)")
     else:
-        main_logger.info("💻 Using CPU backend (GPU not available)")
-        gpu_info['recommended_backend'] = 'cpu'
+        main_logger.info("💻 백엔드: CPU 전용")
+        main_logger.info("⚡ 성능: 양호 (CPU 최적화)")
+        
+        if gpu_info['error_details']:
+            main_logger.info("❌ GPU 사용 불가 원인:")
+            for i, error in enumerate(gpu_info['error_details'], 1):
+                main_logger.info(f"   {i}. {error}")
+            
+            main_logger.info("\n💡 GPU 지원을 원한다면:")
+            main_logger.info("   1. NVIDIA GPU 드라이버 최신 버전 설치")
+            main_logger.info("   2. CUDA Toolkit 설치 (11.x 또는 12.x)")
+            main_logger.info("   3. CuPy 설치: pip install cupy-cuda11x 또는 cupy-cuda12x")
+            main_logger.info("   4. 시스템 재시작 후 다시 시도")
     
     return gpu_info
+
+def show_gpu_welcome_message(gpu_info):
+    """GPU 지원 정보를 포함한 환영 메시지 표시 - 향상된 버전"""
+    if gpu_info['recommended_backend'] in ['cupy', 'numba']:
+        # GPU 사용 가능한 경우
+        welcome_msg = f"""
+🚀 GPU ENHANCED ULTIMATE OTHELLO AI 🚀
+
+축하합니다! GPU 가속을 사용할 수 있습니다!
+
+🔥 GPU 정보:
+• Backend: {gpu_info['recommended_backend'].upper()}
+• CUDA Devices: {gpu_info['cuda_devices']}
+• GPU Memory: {gpu_info['gpu_memory']} GB
+• CUDA Version: {gpu_info['cuda_version']}
+• CuPy Available: {'Yes' if gpu_info['cupy_available'] else 'No'}
+• Numba CUDA: {'Yes' if gpu_info['numba_available'] else 'No'}
+
+⚡ GPU 가속 기능:
+✓ 병렬 보드 평가 (10x+ 빠름)
+✓ 배치 이동 생성 (5x+ 빠름)
+✓ 고속 transposition table
+✓ 벡터화된 패턴 인식
+✓ 병렬 종료게임 탐색
+
+⚠️ 주의: 이 AI는 극도로 강력합니다!
+GPU 가속으로 더욱 무시무시해졌습니다.
+
+준비되셨나요? 🔥"""
+    else:
+        # CPU만 사용 가능한 경우
+        welcome_msg = f"""
+💻 ULTIMATE OTHELLO AI (CPU MODE) 💻
+
+GPU를 사용할 수 없지만 여전히 강력한 AI입니다!
+
+❌ GPU 사용 불가 원인:
+"""
+        for i, error in enumerate(gpu_info['error_details'][:3], 1):  # 최대 3개만 표시
+            welcome_msg += f"{i}. {error}\n"
+        
+        welcome_msg += f"""
+🎯 CPU 최적화 기능:
+✓ 18-ply 깊이 탐색
+✓ 완벽한 종료게임 솔버
+✓ 고급 평가 함수
+✓ 토너먼트급 오프닝북
+✓ Alpha-beta 가지치기
+✓ 반복 심화 탐색
+
+💡 GPU 가속을 원한다면:
+1. NVIDIA GPU 드라이버 업데이트
+2. CUDA Toolkit 설치 (11.x/12.x)
+3. pip install cupy-cuda11x 또는 cupy-cuda12x
+4. 시스템 재시작
+
+그래도 이 AI는 충분히 강력합니다! 💪"""
+    
+    response = messagebox.askyesno("🎮 ULTIMATE CHALLENGE", welcome_msg)
+    
+    if response:
+        main_logger.info("🎮 사용자가 도전을 수락했습니다!")
+    else:
+        main_logger.info("👋 사용자가 도전을 거절했습니다")
+    
+    return response
 
 def check_dependencies():
     """필수 파일 및 의존성 확인"""
