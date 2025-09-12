@@ -5,3 +5,6 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = OthelloGUI(root)
     root.mainloop()
+
+
+
