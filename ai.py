@@ -36,7 +36,14 @@ class TTEntry:
 class BitBoard:
     """Bit-based board representation for ultra-fast operations"""
     def __init__(self, board=None):
-        if board:
+        # Allow initializing from another BitBoard or from a Board
+        if isinstance(board, BitBoard):
+            # Fast copy from an existing BitBoard
+            self.black = int(board.black)
+            self.white = int(board.white)
+            self.hash_base = np.uint64(getattr(board, 'hash_base', 0))
+        elif board is not None:
+            # Initialize from a classic Board (with .board 2D array)
             self.black = 0
             self.white = 0
             for i in range(8):
@@ -292,7 +299,8 @@ class SearchEngine:
         if depth == 0 or not moves:
             if not moves:
                 opp = opponent(side_to_move)
-                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                # If opponent also has no moves, it's terminal; no need to re-wrap bb
+                if not bb.get_valid_moves_bitboard(opp):
                     bcnt = bb.popcount(bb.black)
                     wcnt = bb.popcount(bb.white)
                     diff = (bcnt - wcnt) if ai_color == BLACK else (wcnt - bcnt)
@@ -608,7 +616,7 @@ class UltraAdvancedAI:
             if not moves:
                 # Pass if opponent has moves; else game over
                 opp = opponent(side_to_move)
-                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                if not bb.get_valid_moves_bitboard(opp):
                     # Terminal: final score by disc diff
                     bcnt = bb.popcount(bb.black)
                     wcnt = bb.popcount(bb.white)
