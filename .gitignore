@@ -1,2 +1,5 @@
 __pycache__
 .history
+*.pyc
+*.pyo
+*.pyd

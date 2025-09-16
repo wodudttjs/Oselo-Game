@@ -1,16 +1,17 @@
-from functools import lru_cache
-import multiprocessing
+# ultra_ai/UltraAdvancedAI_corner_safe.py
+# Corner-safety hardened search + Corner-first policy + 2-ply corner avoidance:
+#  - If a legal corner move exists this turn, TAKE IT immediately (pre-search).
+#  - Filter out moves that give opponent an immediate corner (1-ply) when alternatives exist.
+#  - NEW: Filter (when possible) moves that let opponent force a corner in 2 plies.
+
+from ast import pattern
+from os import remove, startfile
+from shutil import move
 import time
-import random
-import threading
-from collections import defaultdict, deque
-from constants import adjust_position_weight
-from constants import BLACK, WHITE, EMPTY, opponent, EARLY_WEIGHTS, MID_WEIGHTS, LATE_WEIGHTS, CORNERS, X_SQUARES, C_SQUARES
-from board import Board
 import logging
-import numpy as np
-import pickle
+import random
 from dataclasses import dataclass
+
 from typing import Optional, Tuple, List, Dict
 import hashlib
 import math
@@ -23,14 +24,47 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', date
 MATE_SCORE = 100000
 INF_SCORE = 10**9
 
-@dataclass
+from collections import defaultdict
+from typing import Optional, Tuple, Dict, List
+
+from constants import (
+    adjust_position_weight,
+    BLACK,
+    WHITE,
+    EMPTY,
+    opponent,
+    CORNERS,
+    X_SQUARES,
+    C_SQUARES,
+)
+
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
+
+# ---------------- Zobrist (deterministic) ----------------
+_rng = random.Random(1337)
+ZOBRIST_TABLE: List[List[List[int]]] = [[[0 for _ in range(3)] for _ in range(8)] for _ in range(8)]
+for i in range(8):
+    for j in range(8):
+        ZOBRIST_TABLE[i][j][1] = _rng.getrandbits(64) or 1  # BLACK
+        ZOBRIST_TABLE[i][j][2] = _rng.getrandbits(64) or 1  # WHITE
+ZOBRIST_TURN: int = _rng.getrandbits(64) or 1
+
+
+def _pidx(v: int) -> int:
+    return 1 if v == BLACK else 2 if v == WHITE else 0
+
+
+DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
+
+
+@dataclass(slots=True)
 class TTEntry:
-    """Transposition Table Entry with enhanced information"""
     score: float
     move: Optional[Tuple[int, int]]
     depth: int
-    node_type: str  # 'exact', 'lowerbound', 'upperbound'
+    node_type: str
     age: int
+
     pos_hash: int
     
 class BitBoard:
@@ -64,6 +98,8 @@ class BitBoard:
     
     def popcount(self, mask):
         return bin(mask).count('1')
+
+
 
     @staticmethod
     def _iter_bits(mask):
@@ -413,53 +449,40 @@ class SearchEngine:
         return self.popcount(own) - self.popcount(opp)
 
 class UltraAdvancedAI:
-    def __init__(self, color, difficulty='hard', time_limit=10.0):
+    """Corner-first Othello AI with 2-ply corner exposure avoidance.
+       Public: get_move(board) -> (x,y) or None
+    """
+
+    def __init__(self, color: int, difficulty: str = 'hard', time_limit: float = 10.0) -> None:
         self.color = color
         self.difficulty = difficulty
-        self.time_limit = time_limit
-        
-        # Enhanced transposition table with replacement scheme
-        self.tt = {}
+        self.time_limit = float(time_limit)
+
+        self.tt: Dict[int, TTEntry] = {}
         self.tt_age = 0
-        self.max_tt_size = 2**20  # 1M entries
-        
-        # Multi-tier move ordering
+        self.max_tt_size = 2**20
+
         self.killer_moves = defaultdict(list)
-        self.counter_moves = {}
-        self.history_table = np.zeros((8, 8), dtype=np.int32)
-        self.butterfly_table = np.zeros((8, 8), dtype=np.int32)
-        
-        # Search statistics
+        self.counter_moves: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        self.history_table: List[int] = [0] * 64
+
         self.nodes_searched = 0
         self.tt_hits = 0
         self.cutoffs = 0
-        
-        # Neural network simulation (pattern-based evaluation)
-        self.pattern_weights = self._initialize_patterns()
-        
-        # Parallel search setup
-        self.use_parallel = True
-        self.max_workers = min(4, multiprocessing.cpu_count())
-        
-        # Opening book
-        self.opening_book = self._load_opening_book()
-        
-        # Endgame tablebase simulation
-        self.endgame_cache = {}
-        
-        # Initialize position weights with symmetry
-        self._initialize_weights()
-        
-        # Difficulty settings with advanced features
+
+        self.pattern_weights = self._init_patterns()
+
+        self.opening_book: Dict[int, Tuple[int, int]] = {}
+        self.endgame_cache: Dict[Tuple[int, int], Tuple[int, Optional[Tuple[int, int]]]] = {}
+
+        self._init_pos_weights()
         if difficulty == 'easy':
             self.max_depth = 6
-            self.use_parallel = False
-            self.selective_depth = 8
         elif difficulty == 'medium':
             self.max_depth = 8
-            self.selective_depth = 12
-        else:  # hard
+        else:
             self.max_depth = 10
+
             self.selective_depth = 16
             
         # Pre-computed patterns for ultra-fast evaluation
@@ -695,48 +718,87 @@ class UltraAdvancedAI:
     def _initialize_patterns(self):
         """Initialize pattern-based evaluation weights"""
         patterns = {
+
+
+        # Precompute X/C → corner map for instant checks
+        self.X_TO_CORNER = {(1, 1): (0, 0), (1, 6): (0, 7), (6, 1): (7, 0), (6, 6): (7, 7)}
+        self.C_TO_CORNER = {
+            (0, 1): (0, 0), (1, 0): (0, 0),
+            (0, 6): (0, 7), (1, 7): (0, 7),
+            (7, 1): (7, 0), (6, 0): (7, 0),
+            (7, 6): (7, 7), (6, 7): (7, 7),
+        }
+
+        self.enable_null_move = True
+        self.null_move_min_depth = 3
+        self.null_move_R = 2
+        self.null_move_min_empties = 14
+        self.enable_futility = True
+        self.futility_margin = 250
+        self.futility_max_depth = 2
+        self.enable_lmp = True
+
+        # 2-ply corner avoidance tunables
+        self.two_ply_check_empties = 20  # apply when empties > this
+        self.two_ply_opp_limit = 6      # consider up to N opponent replies
+        self.two_ply_our_limit = 6      # consider up to M our replies
+    
+
+    # ---------- init helpers ----------
+
+    def _init_patterns(self):
+        return {
+
             'corner_control': 1000,
             'edge_stability': 300,
             'mobility_ratio': 200,
             'disc_differential': 100,
-            'potential_mobility': 150,
             'frontier_discs': -50,
-            'corner_proximity': -200,
-            'wedge_pattern': 400,
-            'diagonal_control': 250
         }
-        return patterns
 
-    def _load_opening_book(self):
-        """Load pre-computed opening moves"""
-        # Simulated opening book - in practice, load from file
-        book = {
-            # Opening position hashes -> best moves
-        }
-        return book
-
-    def _initialize_weights(self):
-        """Initialize all position weights with enhanced values"""
-        for corner in CORNERS:
-            adjust_position_weight(corner, 500)  # Increased corner value
+    def _init_pos_weights(self) -> None:
+        for c in CORNERS:
+            adjust_position_weight(c, 500)
         for x in X_SQUARES:
-            adjust_position_weight(x, -120, stages=('early', 'mid'))
+            adjust_position_weight(x, -160, stages=('early', 'mid'))  # 강한 패널티
         for c in C_SQUARES:
-            adjust_position_weight(c, -60, stages=('mid',))
+            adjust_position_weight(c, -100, stages=('mid',))
 
-    def _precompute_patterns(self):
-        """Pre-compute common board patterns for instant lookup"""
-        self.pattern_cache = {}
-        # Pre-compute common 3x3 patterns around corners
-        for i in range(512):  # 2^9 possible patterns
-            pattern = []
-            for j in range(9):
-                pattern.append((i >> j) & 1)
-            self.pattern_cache[i] = self._evaluate_pattern(pattern)
+    # ---------- hashing ----------
 
-    def _evaluate_pattern(self, pattern):
-        """Evaluate a 3x3 pattern"""
+    def _hash(self, board, side: int) -> int:
+        h = 0
+        grid = board.board
+        for i in range(8):
+            row = grid[i]
+            for j in range(8):
+                v = row[j]
+                if v:
+                    h ^= ZOBRIST_TABLE[i][j][_pidx(v)]
+        if side == WHITE:
+            h ^= ZOBRIST_TURN
+        return h
+
+    # ---------- eval (kept short) ----------
+
+    def evaluate_board_neural(self, board) -> int:
+        empties = board.get_empty_count()
+        if empties == 0:
+            b, w = board.count_stones()
+            diff = (b - w) if self.color == BLACK else (w - b)
+            return 10000 if diff > 0 else -10000 if diff < 0 else 0
+        my_c = sum(1 for x, y in CORNERS if board.board[x][y] == self.color)
+        op_c = sum(1 for x, y in CORNERS if board.board[x][y] == opponent(self.color))
+        corner_control = my_c - op_c
+        my_moves = len(board.get_valid_moves(self.color))
+        op_moves = len(board.get_valid_moves(opponent(self.color)))
+        mobility = (my_moves - op_moves) / max(1, my_moves + op_moves)
+        b, w = board.count_stones()
+        disc_diff = (b - w) if self.color == BLACK else (w - b)
+        frontier = board.get_frontier_count(opponent(self.color)) - board.get_frontier_count(self.color)
+        pw = self.pattern_weights
         score = 0
+
         # Corner in center
         if pattern[4] == 1:  # Our piece in corner
             score += 100
@@ -778,11 +840,60 @@ class UltraAdvancedAI:
 
     def _is_quiet_move(self, board, move):
         """Check if move is 'quiet' (corner, edge, or high-capture)"""
+=======
+        score += corner_control * pw['corner_control']
+        score += mobility * pw['mobility_ratio']
+        score += disc_diff * pw['disc_differential']
+        score += frontier * pw['frontier_discs']
+        if empties > 50:
+            score *= 1.2
+        elif empties <= 20:
+            score *= 0.85
+        return int(score)
+
+    # ---------- corner safety helpers ----------
+
+    def _has_corner_move(self, board, side: int) -> bool:
+        return any(m in CORNERS for m in board.get_valid_moves(side))
+
+    def _is_corner_exposing_move(self, board, move: Tuple[int, int], side: int) -> bool:
+
         x, y = move
-        if (x, y) in CORNERS:
+        grid = board.board
+        if move in CORNERS:
+            return False
+        c = self.X_TO_CORNER.get(move)
+        if c:
+            cx, cy = c
+            if grid[cx][cy] == EMPTY:
+                return True
+        c = self.C_TO_CORNER.get(move)
+        if c:
+            cx, cy = c
+            if grid[cx][cy] == EMPTY:
+                return True
+        nb = board.apply_move(x, y, side)
+        opp = opponent(side)
+        if self._has_corner_move(nb, opp):
             return True
-        if x == 0 or x == 7 or y == 0 or y == 7:
+        return False
+
+    def _exposes_corner_in_two(self, board, move: Tuple[int, int], side: int,
+                               opp_limit: int, our_limit: int) -> bool:
+        """Conservative 2-ply trap check.
+        Returns True if there exists an opponent reply after our move such that
+        for all of our top replies the opponent then has an immediate corner.
+        """
+        x, y = move
+        if move in CORNERS:
+            return False
+        nb = board.apply_move(x, y, side)
+        opp = opponent(side)
+        opp_moves = nb.get_valid_moves(opp)
+        # Immediate corner already
+        if any(m in CORNERS for m in opp_moves):
             return True
+
         # Check if move captures many pieces
         new_board = board.apply_move(x, y, self.color)
         captured = len(new_board.move_history[-1][3])
@@ -816,73 +927,74 @@ class UltraAdvancedAI:
             diff = (b - w) if self.color == BLACK else (w - b)
             return MATE_SCORE * (1 if diff > 0 else -1 if diff < 0 else 0)
 
-        score = 0
-        empty_count = board.get_empty_count()
-        
-        # Multi-layer evaluation inspired by neural networks
-        features = self._extract_features(board)
-        
-        # Pattern-based scoring
-        score += features['corner_control'] * self.pattern_weights['corner_control']
-        score += features['mobility'] * self.pattern_weights['mobility_ratio'] 
-        score += features['stability'] * self.pattern_weights['edge_stability']
-        score += features['disc_diff'] * self.pattern_weights['disc_differential']
-        score += features['frontier'] * self.pattern_weights['frontier_discs']
-        
-        # Game phase adjustment
-        phase_multiplier = self._get_phase_multiplier(empty_count)
-        score *= phase_multiplier
-        
-        # Add positional bonuses
-        score += self._evaluate_positional_patterns(board)
-        
-        return int(score)
+        # Prioritize opponent replies that are near empty corners or flip more
+        def opp_priority(mv: Tuple[int, int]) -> int:
+            px, py = mv
+            s = 0
+            c = self.X_TO_CORNER.get(mv)
+            if c:
+                cx, cy = c
+                if nb.board[cx][cy] == EMPTY:
+                    s += 500
+            c = self.C_TO_CORNER.get(mv)
+            if c:
+                cx, cy = c
+                if nb.board[cx][cy] == EMPTY:
+                    s += 200
+            s += self._estimate_flips_scan(nb.board, px, py, opp)
+            return s
+        opp_moves = sorted(opp_moves, key=opp_priority, reverse=True)[:opp_limit]
+        for om in opp_moves:
+            nb2 = nb.apply_move(om[0], om[1], opp)
+            our_replies = nb2.get_valid_moves(side)
+            if not our_replies:
+                # we pass; if they already can corner now, it's a trap
+                if self._has_corner_move(nb2, opp):
+                    return True
+                # else continue (not decisive)
+                continue
+            # Try to parry with our best replies
+            def our_priority(mv: Tuple[int, int]) -> int:
+                rx, ry = mv
+                return self._estimate_flips_scan(nb2.board, rx, ry, side)
+            parried = False
+            for rm in sorted(our_replies, key=our_priority, reverse=True)[:our_limit]:
+                nb3 = nb2.apply_move(rm[0], rm[1], side)
+                if not self._has_corner_move(nb3, opp):
+                    parried = True
+                    break
+            if not parried:
+                return True
+        return False
 
-    def _extract_features(self, board):
-        """Extract features for neural-style evaluation"""
-        features = {}
-        
-        # Corner control
-        my_corners = sum(1 for x, y in CORNERS if board.board[x][y] == self.color)
-        opp_corners = sum(1 for x, y in CORNERS if board.board[x][y] == opponent(self.color))
-        features['corner_control'] = my_corners - opp_corners
-        
-        # Mobility
-        my_moves = len(board.get_valid_moves(self.color))
-        opp_moves = len(board.get_valid_moves(opponent(self.color)))
-        features['mobility'] = (my_moves - opp_moves) / max(1, my_moves + opp_moves)
-        
-        # Disc differential
-        b, w = board.count_stones()
-        features['disc_diff'] = (b - w) if self.color == BLACK else (w - b)
-        
-        # Stability (simplified)
-        features['stability'] = self._count_stable_discs(board)
-        
-        # Frontier discs
-        features['frontier'] = board.get_frontier_count(opponent(self.color)) - board.get_frontier_count(self.color)
-        
-        return features
+    def _corner_exposure_penalty(self, board, move: Tuple[int, int], side: int, empties: int) -> int:
+        if self._is_corner_exposing_move(board, move, side):
+            return 200000 if empties > 20 else 80000
+        return 0
 
-    def _count_stable_discs(self, board):
-        """Fast stable disc counting"""
-        stable_count = 0
-        # Only check corners and edges for speed
-        for x, y in CORNERS:
-            if board.board[x][y] == self.color:
-                stable_count += 3
-            elif board.board[x][y] == opponent(self.color):
-                stable_count -= 3
-        return stable_count
 
-    def _get_phase_multiplier(self, empty_count):
-        """Get phase-based multiplier for evaluation"""
-        if empty_count > 50:
-            return 1.2  # Opening
-        elif empty_count > 20:
-            return 1.0  # Midgame
-        else:
-            return 0.8  # Endgame
+    # ---------- move ordering ----------
+
+    def _static_move_value(self, board, move: Tuple[int, int]) -> int:
+        x, y = move
+        if move in CORNERS:
+            return 20000  # massive bonus
+        c = self.X_TO_CORNER.get(move)
+        if c:
+            cx, cy = c
+            if board.board[cx][cy] == EMPTY:
+                return -10000
+            return 300 if board.board[cx][cy] == self.color else -200
+        c = self.C_TO_CORNER.get(move)
+        if c:
+            cx, cy = c
+            if board.board[cx][cy] == EMPTY:
+                return -4000
+            return -100
+        if x == 0 or x == 7 or y == 0 or y == 7:
+            return 150
+        return 0
+
 
     def _evaluate_positional_patterns(self, board):
         """Evaluate using pre-computed patterns"""
@@ -919,8 +1031,32 @@ class UltraAdvancedAI:
 
     def enhanced_move_ordering(self, board, moves, depth, prev_best=None, side_to_move=None):
         """Multi-stage enhanced move ordering"""
+
+    def _estimate_flips_scan(self, grid, x: int, y: int, side: int) -> int:
+        if grid[x][y] != EMPTY:
+            return 0
+        opp = opponent(side)
+        total = 0
+        for dx, dy in DIRS:
+            i, j = x + dx, y + dy
+            cnt = 0
+            while 0 <= i < 8 and 0 <= j < 8 and grid[i][j] == opp:
+                cnt += 1; i += dx; j += dy
+            if cnt and 0 <= i < 8 and 0 <= j < 8 and grid[i][j] == side:
+                total += cnt
+        return total
+
+    def _order_moves(self, board, moves, depth: int, side: int,
+                     prev_best: Optional[Tuple[int, int]], prev_move: Optional[Tuple[int, int]], empties: int):
+
         if not moves:
             return []
+        grid = board.board
+        key = self._hash(board, side)
+        tt = self.tt.get(key)
+        tt_move = tt.move if tt else None
+        total_hist = sum(self.history_table) or 1
+
 
         move_scores = []
         
@@ -991,12 +1127,61 @@ class UltraAdvancedAI:
 
     def alpha_beta_enhanced(self, board, depth, alpha, beta, maximizing, start_time):
         """Enhanced alpha-beta with all modern techniques"""
+
+        scored: List[Tuple[int, Tuple[int, int]]] = []
+        for mv in moves:
+            x, y = mv
+            s = 0
+            if prev_best and mv == prev_best:
+                s += 10000
+            if tt_move and mv == tt_move:
+                s += 8000
+            killers = self.killer_moves.get(depth, [])
+            if mv in killers:
+                s += 4000 + (2 - killers.index(mv)) * 1000
+            if prev_move is not None and prev_move in self.counter_moves and mv == self.counter_moves[prev_move]:
+                s += 3000
+            s += (self.history_table[(x << 3) | y] * 2000) // total_hist
+            s += self._static_move_value(board, mv)
+            s -= self._corner_exposure_penalty(board, mv, side, empties)
+            s += self._estimate_flips_scan(grid, x, y, side) * 50
+            scored.append((s, mv))
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [m for _, m in scored]
+
+    # ---------- search ----------
+
+    def _lmr(self, depth: int, i: int, n: int) -> int:
+        if depth >= 3 and i >= 3 and n > 6:
+            return min(2, (i - 2) // 3)
+        return 0
+
+    def alpha_beta_enhanced(self, board, depth: int, alpha: float, beta: float, side: int,
+                             start_time: float, prev_move: Optional[Tuple[int, int]] = None):
+
         self.nodes_searched += 1
-        
-        # Time management
-        if self.nodes_searched % 2048 == 0:
-            if time.time() - start_time > self.time_limit * 0.95:
+        if (self.nodes_searched & 0x7FF) == 0 and time.time() - start_time >= self.time_limit * 0.95:
+            return self.evaluate_board_neural(board), None
+
+        key = self._hash(board, side)
+        tt = self.tt.get(key)
+        if tt and tt.depth >= depth:
+            if tt.node_type == 'exact':
+                return tt.score, tt.move
+            if tt.node_type == 'lowerbound' and tt.score >= beta:
+                return tt.score, tt.move
+            if tt.node_type == 'upperbound' and tt.score <= alpha:
+                return tt.score, tt.move
+
+        moves = board.get_valid_moves(side)
+        empties = board.get_empty_count()
+        if depth == 0:
+            return self.evaluate_board_neural(board), None
+        if not moves:
+            opp = opponent(side)
+            if not board.get_valid_moves(opp):
                 return self.evaluate_board_neural(board), None
+
         
         # Transposition table lookup (hash includes side-to-move)
         current_color = self.color if maximizing else opponent(self.color)
@@ -1052,54 +1237,85 @@ class UltraAdvancedAI:
             new_board = board.apply_move(*move, current_color)
             new_board._last_move = move  # For counter-move heuristic
             
-            if i == 0:
-                # Principal variation - full window
-                score, _ = self.alpha_beta_enhanced(
-                    new_board, search_depth - 1, -beta, -alpha, not maximizing, start_time
-                )
-                score = -score
-            else:
-                # Zero-window search
-                score, _ = self.alpha_beta_enhanced(
-                    new_board, search_depth - 1, -alpha - 1, -alpha, not maximizing, start_time
-                )
-                score = -score
-                
-                # Re-search if needed
-                if alpha < score < beta:
-                    score, _ = self.alpha_beta_enhanced(
-                        new_board, search_depth - 1, -beta, -score, not maximizing, start_time
-                    )
-                    score = -score
-            
-            if maximizing:
-                if score > best_score:
-                    best_score = score
-                    best_move = move
-                alpha = max(alpha, score)
-            else:
-                if score < best_score:
-                    best_score = score
-                    best_move = move
-                beta = min(beta, score)
-            
-            # Beta cutoff
-            if beta <= alpha:
-                self.cutoffs += 1
-                # Update killer moves
-                if len(self.killer_moves[depth]) >= 2:
-                    self.killer_moves[depth].pop(0)
-                self.killer_moves[depth].append(move)
-                
-                # Update history table
-                x, y = move
-                self.history_table[x][y] += depth * depth
-                
-                # Update counter moves
-                if hasattr(board, '_last_move'):
-                    self.counter_moves[board._last_move] = move
-                
+
+            sc, _ = self.alpha_beta_enhanced(board, depth, -beta, -alpha, opp, start_time, prev_move)
+            return -sc, None
+
+        # null-move
+        if self.enable_null_move and depth >= self.null_move_min_depth and empties >= self.null_move_min_empties and moves:
+            opp = opponent(side)
+            R = self.null_move_R if depth > 6 else 1
+            sc, _ = self.alpha_beta_enhanced(board, depth - 1 - R, -beta, -beta + 1, opp, start_time, prev_move)
+            sc = -sc
+            if sc >= beta:
+                return sc, None
+
+        # futility
+        if self.enable_futility and depth <= self.futility_max_depth:
+            st = self.evaluate_board_neural(board)
+            if st + self.futility_margin <= alpha:
+                return st, None
+
+        ordered = self._order_moves(board, moves, depth, side, tt.move if tt else None, prev_move, empties)
+
+        # Filter out corner-exposing moves (1-ply), then 2-ply traps if safe options exist
+        if empties > self.two_ply_check_empties:
+            safe1 = [m for m in ordered if not self._is_corner_exposing_move(board, m, side)]
+            if safe1:
+                # try to filter 2-ply traps; if all are traps, keep safe1
+                safer2 = [m for m in safe1 if not self._exposes_corner_in_two(board, m, side,
+                                                                              self.two_ply_opp_limit,
+                                                                              self.two_ply_our_limit)]
+                if safer2:
+                    ordered = safer2
+                else:
+                    ordered = safe1
+
+        best_move = ordered[0]
+        best_score = float('-inf')
+        a0 = alpha
+        opp = opponent(side)
+
+        lmp_cut = None
+        if self.enable_lmp and depth <= 2:
+            lmp_cut = 6 + depth
+
+        for i, mv in enumerate(ordered):
+            if lmp_cut is not None and i > lmp_cut and alpha > a0:
                 break
+            red = self._lmr(depth, i, len(ordered))
+            x, y = mv
+            nb = board.apply_move(x, y, side)
+            child_prev = mv
+
+
+            if i == 0:
+                sc, _ = self.alpha_beta_enhanced(nb, depth - 1 - red, -beta, -alpha, opp, start_time, child_prev)
+                sc = -sc
+            else:
+                sc, _ = self.alpha_beta_enhanced(nb, depth - 1 - red, -alpha - 1, -alpha, opp, start_time, child_prev)
+                sc = -sc
+                if alpha < sc < beta:
+                    sc2, _ = self.alpha_beta_enhanced(nb, depth - 1 - red, -beta, -sc, opp, start_time, child_prev)
+                    sc = -sc2
+
+            if sc > best_score:
+                best_score = sc
+                best_move = mv
+            if sc > alpha:
+                alpha = sc
+
+            if alpha >= beta:
+                kl = self.killer_moves[depth]
+                if mv not in kl:
+                    if len(kl) >= 2:
+                        kl.pop(0)
+                    kl.append(mv)
+                self.history_table[(x << 3) | y] += depth * depth
+                if prev_move is not None:
+                    self.counter_moves[prev_move] = mv
+                break
+
         
         # Store in transposition table with simple replacement policy
         node_type = 'exact'
@@ -1127,18 +1343,82 @@ class UltraAdvancedAI:
             pos_hash=int(getattr(board, '_zobrist_hash', 0))
         )
         
+
+
+        if len(self.tt) >= self.max_tt_size:
+            threshold = self.tt_age - 2
+            removed = 0
+            for k in list(self.tt.keys()):
+                if self.tt[k].age < threshold:
+                    self.tt.pop(k); removed += 1
+                if removed >= max(1, self.max_tt_size // 64):
+                    break
+
+        ntype = 'exact'
+        if best_score <= a0:
+            ntype = 'upperbound'
+        elif best_score >= beta:
+            ntype = 'lowerbound'
+        self.tt[key] = TTEntry(best_score, best_move, depth, ntype, self.tt_age)
+
         return best_score, best_move
 
+    # ---------- corner-first policy helpers ----------
+
+    @staticmethod
+    def _pick_corner_if_available(moves: List[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
+        for m in moves:
+            if m in CORNERS:
+                return m
+        return None
+
+    # ---------- endgame & ID ----------
+
+    def perfect_endgame_solver(self, board, empties: int, side: int):
+        if empties > 12:
+            return None
+        key = (self._hash(board, side), empties)
+        if key in self.endgame_cache:
+            return self.endgame_cache[key]
+        moves = board.get_valid_moves(side)
+        opp = opponent(side)
+        if empties == 0 or (not moves and not board.get_valid_moves(opp)):
+            b, w = board.count_stones()
+            diff = (b - w) if self.color == BLACK else (w - b)
+            res = (diff, None)
+            self.endgame_cache[key] = res
+            return res
+        if not moves:
+            sc, _ = self.perfect_endgame_solver(board, empties, opp)
+            res = (-sc, None)
+            self.endgame_cache[key] = res
+            return res
+        best_sc, best_mv = -10**9, None
+        for mv in moves:
+            x, y = mv
+            nb = board.apply_move(x, y, side)
+            sc, _ = self.perfect_endgame_solver(nb, empties - 1, opp)
+            sc = -sc
+            if sc > best_sc:
+                best_sc, best_mv = sc, mv
+        res = (best_sc, best_mv)
+        self.endgame_cache[key] = res
+        return res
+
     def iterative_deepening_ultimate(self, board):
-        """Ultimate iterative deepening with all enhancements"""
-        start_time = time.time()
-        best_move = None
-        moves = board.get_valid_moves(self.color)
-        
+        start = time.time()
+        side = self.color
+        moves = board.get_valid_moves(side)
         if not moves:
             return None
+        # Corner-first: if any corner is legal now, take it immediately
+        corner_now = self._pick_corner_if_available(moves)
+        if corner_now is not None:
+            logging.info(f"[Corner-Safe AI] Corner available → taking {corner_now}")
+            return corner_now
         if len(moves) == 1:
             return moves[0]
+
         
         # Opening book check
         board_hash = self.zobrist_hash(board, self.color)
@@ -1147,33 +1427,32 @@ class UltraAdvancedAI:
         
         logging.info(f"[Ultimate AI] Starting search: max_depth={self.max_depth}, moves={len(moves)}")
         
+
+        h = self._hash(board, side)
+        if h in self.opening_book:
+            return self.opening_book[h]
+
+        logging.info(f"[Corner-Safe AI] max_depth={self.max_depth}, moves={len(moves)}")
+        best_move = None
+
         prev_score = 0
-        aspiration_window = 50
-        
+        window = 50
+        nodes_total = 0
         for depth in range(1, self.max_depth + 1):
+            self.nodes_searched = self.tt_hits = self.cutoffs = 0
+            self.tt_age += 1
             try:
-                self.nodes_searched = 0
-                self.tt_hits = 0
-                self.cutoffs = 0
-                self.tt_age += 1
-                
-                depth_start = time.time()
-                
-                # Aspiration window search for deeper searches
-                if depth >= 4 and best_move:
-                    alpha = prev_score - aspiration_window
-                    beta = prev_score + aspiration_window
-                    
-                    score, move = self.alpha_beta_enhanced(board, depth, alpha, beta, True, start_time)
-                    
-                    # Research if outside window
-                    if score <= alpha:
-                        score, move = self.alpha_beta_enhanced(board, depth, float('-inf'), beta, True, start_time)
-                    elif score >= beta:
-                        score, move = self.alpha_beta_enhanced(board, depth, alpha, float('inf'), True, start_time)
-                        
-                    aspiration_window = min(100, aspiration_window + 25)
+                if depth >= 4 and best_move is not None:
+                    alpha = prev_score - window
+                    beta = prev_score + window
+                    sc, mv = self.alpha_beta_enhanced(board, depth, alpha, beta, side, start, None)
+                    if sc <= alpha:
+                        sc, mv = self.alpha_beta_enhanced(board, depth, float('-inf'), beta, side, start, None)
+                    elif sc >= beta:
+                        sc, mv = self.alpha_beta_enhanced(board, depth, alpha, float('inf'), side, start, None)
+                    window = min(100, window + 25)
                 else:
+
                     score, move = self.alpha_beta_enhanced(board, depth, float('-inf'), float('inf'), True, start_time)
                 
                 if move:
@@ -1191,11 +1470,19 @@ class UltraAdvancedAI:
                     
                 if time.time() - start_time > self.time_limit * 0.8:
                     logging.info("Time limit approaching - stopping search")
+
+                    sc, mv = self.alpha_beta_enhanced(board, depth, float('-inf'), float('inf'), side, start, None)
+                if mv is not None:
+                    best_move = mv
+                    prev_score = sc
+                nodes_total += self.nodes_searched
+                if abs(sc) >= 9000 or time.time() - start >= self.time_limit * 0.8:
+
                     break
-                    
             except Exception as e:
-                logging.error(f"Error at depth {depth}: {e}")
+                logging.exception(f"Error at depth {depth}: {e}")
                 break
+
         
         total_time = time.time() - start_time
         # Estimate nodes per second using last depth's count (already logged per depth)
@@ -1316,4 +1603,20 @@ class UltraAdvancedAI:
         if move is not None:
             return move
         # Fallback
+
+        return best_move
+
+    def get_move(self, board) -> Optional[Tuple[int, int]]:
+        # Corner-first BEFORE any endgame shortcut
+        my_moves = board.get_valid_moves(self.color)
+        corner_now = self._pick_corner_if_available(my_moves)
+        if corner_now is not None:
+            logging.info(f"[Corner-Safe AI] Corner available at root → taking {corner_now}")
+            return corner_now
+        empties = board.get_empty_count()
+        end = self.perfect_endgame_solver(board, empties, self.color)
+        if end is not None and end[1] is not None:
+            logging.info(f"Perfect endgame move: {end[1]}")
+            return end[1]
+ main
         return self.iterative_deepening_ultimate(board)
