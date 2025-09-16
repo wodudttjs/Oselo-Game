@@ -105,7 +105,7 @@ class OthelloGUI:
         ai_color = WHITE if self.human_color == BLACK else BLACK
 
         self.ai = UltraAdvancedAI(ai_color, difficulty)
-=======
+
         
         # 시간 제한을 난이도별로 설정
         time_limits = {"easy": 3.0, "medium": 8.0, "hard": 15.0}

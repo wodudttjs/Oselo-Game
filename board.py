@@ -1,9 +1,9 @@
-
+from __future__ import annotations
 from constants import EMPTY, BLACK, WHITE, opponent, CORNERS
 from zobrist import ZOBRIST_TABLE
 import numpy as np
 import copy
-=======
+
 # board_optimized.py
 # Drop-in, faster Board with zero-deepcopy apply, cached moves, and micro-opts.
 

@@ -1,9 +1,27 @@
-main -> 기존 메인
+Othello (Reversi) with Tkinter GUI and Advanced AI
 
-enhanced_main -> Egaroucid ai 업데이트(https://github.com/Nyanyan/Egaroucid)
+Overview
+- Tkinter-based GUI (`main.py`, `gui.py`).
+- Core game logic (`board.py`, `constants.py`).
+- Heuristic AI with alpha–beta and extras (`ai.py`).
 
-ultimate_main -> gui 업데이트 및 ai 업데이트 (Error in depth 1: 'dict' object has no attribute 'best_move' 수정해야함)
+Requirements
+- Python 3.9+ with Tkinter included (Windows/Mac installers usually include it).
+- `numpy` for AI internals.
 
-update_main -> 한국어 업데이트한 메인
+Setup (Windows PowerShell)
+1. Create a virtual environment:
+   - `python -m venv .venv`
+2. Activate it:
+   - `.venv\Scripts\Activate`
+3. Install dependencies:
+   - `pip install -r requirements.txt`
 
-4가지 버전다 실행할 수 있음 
+Run
+- `python main.py`
+
+Notes
+- The app prompts for your color (Black goes first).
+- If you get a Tkinter error, install a Python build that includes Tk support.
+- The AI can take longer in late game on hard difficulty.
+

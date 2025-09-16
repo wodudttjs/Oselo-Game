@@ -4,6 +4,9 @@
 #  - Filter out moves that give opponent an immediate corner (1-ply) when alternatives exist.
 #  - NEW: Filter (when possible) moves that let opponent force a corner in 2 plies.
 
+from ast import pattern
+from os import remove, startfile
+from shutil import move
 import time
 import logging
 import random
@@ -67,7 +70,14 @@ class TTEntry:
 class BitBoard:
     """Bit-based board representation for ultra-fast operations"""
     def __init__(self, board=None):
-        if board:
+        # Allow initializing from another BitBoard or from a Board
+        if isinstance(board, BitBoard):
+            # Fast copy from an existing BitBoard
+            self.black = int(board.black)
+            self.white = int(board.white)
+            self.hash_base = np.uint64(getattr(board, 'hash_base', 0))
+        elif board is not None:
+            # Initialize from a classic Board (with .board 2D array)
             self.black = 0
             self.white = 0
             for i in range(8):
@@ -325,7 +335,8 @@ class SearchEngine:
         if depth == 0 or not moves:
             if not moves:
                 opp = opponent(side_to_move)
-                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                # If opponent also has no moves, it's terminal; no need to re-wrap bb
+                if not bb.get_valid_moves_bitboard(opp):
                     bcnt = bb.popcount(bb.black)
                     wcnt = bb.popcount(bb.white)
                     diff = (bcnt - wcnt) if ai_color == BLACK else (wcnt - bcnt)
@@ -628,7 +639,7 @@ class UltraAdvancedAI:
             if not moves:
                 # Pass if opponent has moves; else game over
                 opp = opponent(side_to_move)
-                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                if not bb.get_valid_moves_bitboard(opp):
                     # Terminal: final score by disc diff
                     bcnt = bb.popcount(bb.black)
                     wcnt = bb.popcount(bb.white)
@@ -731,6 +742,7 @@ class UltraAdvancedAI:
         self.two_ply_check_empties = 20  # apply when empties > this
         self.two_ply_opp_limit = 6      # consider up to N opponent replies
         self.two_ply_our_limit = 6      # consider up to M our replies
+    
 
     # ---------- init helpers ----------
 
@@ -1019,7 +1031,7 @@ class UltraAdvancedAI:
 
     def enhanced_move_ordering(self, board, moves, depth, prev_best=None, side_to_move=None):
         """Multi-stage enhanced move ordering"""
-=======
+
     def _estimate_flips_scan(self, grid, x: int, y: int, side: int) -> int:
         if grid[x][y] != EMPTY:
             return 0
