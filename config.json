@@ -1,0 +1,11 @@
+{
+  "tt_size": 1048576,
+  "time_limit": 10.0,
+  "use_bitboard": true,
+  "difficulties": {
+    "easy": { "max_depth": 6, "use_parallel": false },
+    "medium": { "max_depth": 8, "use_parallel": false },
+    "hard": { "max_depth": 10, "use_parallel": false }
+  }
+}
+

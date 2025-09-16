@@ -1,7 +1,11 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 from board import Board
+
+from ai import UltraAdvancedAI
+
 from ai import UltraAdvancedAI  # UltraAdvancedAI import 유지
+
 from constants import BLACK, WHITE, EMPTY, opponent, CORNERS
 import threading
 
@@ -99,12 +103,16 @@ class OthelloGUI:
         # Create AI with selected difficulty - UltraAdvancedAI 사용
         difficulty = self.difficulty_var.get()
         ai_color = WHITE if self.human_color == BLACK else BLACK
+
+        self.ai = UltraAdvancedAI(ai_color, difficulty)
+=======
         
         # 시간 제한을 난이도별로 설정
         time_limits = {"easy": 3.0, "medium": 8.0, "hard": 15.0}
         time_limit = time_limits.get(difficulty, 8.0)
         
         self.ai = UltraAdvancedAI(ai_color, difficulty, time_limit)
+
 
     def new_game(self):
         """Start a new game"""

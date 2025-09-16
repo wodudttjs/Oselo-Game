@@ -1,3 +1,9 @@
+
+from constants import EMPTY, BLACK, WHITE, opponent, CORNERS
+from zobrist import ZOBRIST_TABLE
+import numpy as np
+import copy
+=======
 # board_optimized.py
 # Drop-in, faster Board with zero-deepcopy apply, cached moves, and micro-opts.
 
@@ -23,11 +29,40 @@ DIRS: Tuple[Tuple[int, int], ...] = (
 )
 
 
+
 class Board:
     __slots__ = ("size", "board", "move_history", "_valid_moves_cache", "_b_count", "_w_count", "_empty_count")
 
     def __init__(self) -> None:
         self.size = 8
+
+        self.board = [[EMPTY] * self.size for _ in range(self.size)]
+        self.board[3][3] = WHITE
+        self.board[3][4] = BLACK
+        self.board[4][3] = BLACK
+        self.board[4][4] = WHITE
+        self.move_history = []
+        # Initialize Zobrist hash for the starting position
+        self._zobrist_hash = self._compute_zobrist()
+
+    def _compute_zobrist(self):
+        h = np.uint64(0)
+        for i in range(8):
+            for j in range(8):
+                piece = self.board[i][j]
+                if piece != EMPTY:
+                    h ^= ZOBRIST_TABLE[i][j][piece]
+        return h
+
+    def in_bounds(self, x, y):
+        return 0 <= x < self.size and 0 <= y < self.size
+
+    def get_valid_moves(self, color):
+        moves = []
+        for x in range(self.size):
+            for y in range(self.size):
+                if self.board[x][y] != EMPTY:
+
         b = [[EMPTY] * 8 for _ in range(8)]
         # initial position
         b[3][3] = WHITE
@@ -81,6 +116,7 @@ class Board:
             for dx, dy in DIRS:
                 nx, ny = x + dx, y + dy
                 if not (0 <= nx < 8 and 0 <= ny < 8) or b[nx][ny] != opp:
+
                     continue
                 # found opponent run
                 nx += dx
@@ -121,6 +157,15 @@ class Board:
                 return v == color
         return False
 
+
+    def apply_move(self, x, y, color):
+        new_board = copy.deepcopy(self)
+        new_board.board[x][y] = color
+        flipped = []
+
+        directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+        for dx, dy in directions:
+
     def apply_move(self, x: int, y: int, color: int) -> "Board":
         """Return a new Board with the move applied (no deepcopy)."""
         # Create a new instance without running __init__
@@ -148,6 +193,7 @@ class Board:
 
         # flip in 8 dirs
         for dx, dy in DIRS:
+
             nx, ny = x + dx, y + dy
             to_flip: List[Tuple[int, int]] = []
             # run opponent chain
@@ -160,6 +206,19 @@ class Board:
                 for fx, fy in to_flip:
                     b[fx][fy] = color
                 flipped.extend(to_flip)
+
+
+        # Incremental Zobrist hash update
+        # Place the new piece at (x, y)
+        new_board._zobrist_hash ^= ZOBRIST_TABLE[x][y][color]
+        # Apply flips: toggle opponent -> color
+        opp = opponent(color)
+        for fx, fy in flipped:
+            new_board._zobrist_hash ^= ZOBRIST_TABLE[fx][fy][opp]
+            new_board._zobrist_hash ^= ZOBRIST_TABLE[fx][fy][color]
+
+        new_board.move_history = self.move_history + [(x, y, color, flipped)]
+        return new_board
 
         # update counters using flipped length
         f = len(flipped)
@@ -179,6 +238,7 @@ class Board:
 
     # ----------------------------- counts ---------------------------------
 
+
     def count_stones(self):
         # use maintained counters; fall back if missing (older pickles)
         try:
@@ -189,6 +249,18 @@ class Board:
             return b, w
 
     def get_empty_count(self):
+
+        return sum(row.count(EMPTY) for row in self.board)
+        
+    def count_score(self, color):
+        """Return disc differential from the given color's perspective."""
+        b, w = self.count_stones()
+        return (b - w) if color == BLACK else (w - b)
+        
+    def is_stable(self, x, y):
+        """Check if a stone at position (x, y) is stable"""
+        if self.board[x][y] == EMPTY:
+
         try:
             return self._empty_count
         except AttributeError:  # pragma: no cover
@@ -201,6 +273,7 @@ class Board:
         b = self.board
         c = b[x][y]
         if c == EMPTY:
+
             return False
         if (x, y) in CORNERS_SET:
             return True
@@ -252,6 +325,10 @@ class Board:
                             break
         return frontier
 
+    def get_hash(self):
+        """Get a hash representation of the board state"""
+
     def get_hash(self) -> int:
         # Simple structural hash; your AI uses its own Zobrist, so this is rarely called.
+
         return hash(tuple(tuple(row) for row in self.board))
