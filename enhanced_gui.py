@@ -1,28 +1,28 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 from board import Board
-
-from ai import UltraAdvancedAI
-
-from ai import UltraAdvancedAI  # UltraAdvancedAI import 유지
-
+from ai import AdvancedAI  # 기존 AI
+from egaroucid_ai import EgaroucidStyleAI  # 새로운 강화된 AI
 from constants import BLACK, WHITE, EMPTY, opponent, CORNERS
 import threading
 
-class OthelloGUI:
+class EnhancedOthelloGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Advanced Othello AI")
-        self.root.geometry("700x750")
+        self.root.title("Enhanced Othello AI with Egaroucid Techniques")
+        self.root.geometry("800x800")
         
         self.cell_size = 60
-        self.margin = 40  # 좌표 표시를 위한 여백
+        self.margin = 40
         self.board = Board()
         self.game_over = False
         self.ai_thinking = False
         
-        # 마지막 수 추적을 위한 변수 추가
-        self.last_move = None  # (x, y, player_type) 형태로 저장
+        # 마지막 수 추적
+        self.last_move = None
+        
+        # AI 선택 변수
+        self.ai_type = "egaroucid"  # "advanced" 또는 "egaroucid"
         
         # Setup UI
         self.setup_ui()
@@ -54,6 +54,13 @@ class OthelloGUI:
         tk.Button(control_frame, text="New Game", command=self.new_game,
                  font=("Arial", 12), bg="lightblue").pack(side=tk.LEFT, padx=5)
         
+        # AI Type selection
+        tk.Label(control_frame, text="AI Type:", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+        self.ai_type_var = tk.StringVar(value="egaroucid")
+        ai_type_combo = ttk.Combobox(control_frame, textvariable=self.ai_type_var,
+                                    values=["advanced", "egaroucid"], width=10)
+        ai_type_combo.pack(side=tk.LEFT, padx=5)
+        
         # Difficulty selection
         tk.Label(control_frame, text="Difficulty:", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
         self.difficulty_var = tk.StringVar(value="medium")
@@ -61,10 +68,17 @@ class OthelloGUI:
                                        values=["easy", "medium", "hard"], width=8)
         difficulty_combo.pack(side=tk.LEFT, padx=5)
         
-        # Canvas for the board (좌표 표시를 위해 크기 증가)
+        # Time limit selection
+        tk.Label(control_frame, text="Time Limit:", font=("Arial", 10)).pack(side=tk.LEFT, padx=5)
+        self.time_limit_var = tk.StringVar(value="3.0")
+        time_limit_combo = ttk.Combobox(control_frame, textvariable=self.time_limit_var,
+                                       values=["1.0", "2.0", "3.0", "5.0", "10.0"], width=6)
+        time_limit_combo.pack(side=tk.LEFT, padx=5)
+        
+        # Canvas for the board
         canvas_size = self.cell_size * 8 + self.margin * 2
         self.canvas = tk.Canvas(self.root, width=canvas_size, height=canvas_size,
-                               bg="#2E8B57", highlightthickness=2)  # 오델로 보드 색상
+                               bg="#2E8B57", highlightthickness=2)
         self.canvas.pack(pady=10)
         self.canvas.bind("<Button-1>", self.handle_click)
         self.canvas.bind("<Motion>", self.handle_hover)
@@ -81,6 +95,10 @@ class OthelloGUI:
                                   font=("Arial", 12))
         self.score_label.pack()
         
+        # AI info label
+        self.ai_info_label = tk.Label(status_frame, text="", font=("Arial", 10), fg="gray")
+        self.ai_info_label.pack()
+        
         # Progress bar for AI thinking
         self.progress = ttk.Progressbar(status_frame, mode='indeterminate', length=200)
         self.progress.pack(pady=5)
@@ -90,8 +108,6 @@ class OthelloGUI:
         self.board = Board()
         self.game_over = False
         self.ai_thinking = False
-        
-        # 마지막 수 정보 초기화
         self.last_move = None
         
         # Ask for player preferences
@@ -100,19 +116,20 @@ class OthelloGUI:
         self.human_color = BLACK if color_choice else WHITE
         self.current_player = BLACK
         
-        # Create AI with selected difficulty - UltraAdvancedAI 사용
+        # Create AI with selected type and difficulty
+        ai_type = self.ai_type_var.get()
         difficulty = self.difficulty_var.get()
+        time_limit = float(self.time_limit_var.get())
         ai_color = WHITE if self.human_color == BLACK else BLACK
-
-        self.ai = UltraAdvancedAI(ai_color, difficulty)
-=======
         
-        # 시간 제한을 난이도별로 설정
-        time_limits = {"easy": 3.0, "medium": 8.0, "hard": 15.0}
-        time_limit = time_limits.get(difficulty, 8.0)
+        if ai_type == "egaroucid":
+            self.ai = EgaroucidStyleAI(ai_color, difficulty, time_limit)
+            ai_name = "Egaroucid-style"
+        else:
+            self.ai = AdvancedAI(ai_color, difficulty, time_limit)
+            ai_name = "Advanced"
         
-        self.ai = UltraAdvancedAI(ai_color, difficulty, time_limit)
-
+        self.ai_info_label.config(text=f"AI: {ai_name} ({difficulty}) - {time_limit}s")
 
     def new_game(self):
         """Start a new game"""
@@ -128,11 +145,11 @@ class OthelloGUI:
         """Draw the game board with coordinates"""
         self.canvas.delete("all")
         
-        # Board area background (흰색 둥근 모서리 사각형)
+        # Board area background
         board_start = self.margin
         board_end = self.margin + 8 * self.cell_size
         
-        # 배경 사각형 (둥근 모서리 효과)
+        # Background rectangle
         self.canvas.create_rectangle(board_start - 5, board_start - 5, 
                                    board_end + 5, board_end + 5,
                                    fill="darkgreen", outline="#888", width=2)
@@ -149,7 +166,6 @@ class OthelloGUI:
                                   fill="black", width=1)
         
         # Draw coordinate labels
-        # Column labels (a-h)
         for i in range(8):
             x = board_start + i * self.cell_size + self.cell_size // 2
             # Top labels
@@ -159,7 +175,7 @@ class OthelloGUI:
             self.canvas.create_text(x, board_end + 20, text=chr(ord('a') + i),
                                   font=("Arial", 14, "bold"), fill="white")
         
-        # Row labels (1-8)
+        # Row labels
         for i in range(8):
             y = board_start + i * self.cell_size + self.cell_size // 2
             # Left labels
@@ -169,14 +185,9 @@ class OthelloGUI:
             self.canvas.create_text(board_end + 20, y, text=str(i + 1),
                                   font=("Arial", 14, "bold"), fill="white")
         
-        # Draw guide dots at grid intersections (격자선 교차점에 점 배치)
-        # 이미지처럼 2-3행 사이, b-c열 사이 등의 격자선 교차점에 점을 배치
-        guide_dots = [
-            (2, 2), (2, 6),  # 2-3행 사이의 b-c, f-g 교차점
-            (6, 2), (6, 6)   # 6-7행 사이의 b-c, f-g 교차점
-        ]
+        # Draw guide dots
+        guide_dots = [(2, 2), (2, 6), (6, 2), (6, 6)]
         for dot_row, dot_col in guide_dots:
-            # 격자선 교차점 좌표 계산 (셀 중앙이 아닌 격자선 위)
             x = board_start + dot_col * self.cell_size
             y = board_start + dot_row * self.cell_size
             self.canvas.create_oval(x - 4, y - 4, x + 4, y + 4, 
@@ -188,7 +199,7 @@ class OthelloGUI:
                 if self.board.board[row][col] != EMPTY:
                     self.draw_stone(row, col, self.board.board[row][col])
         
-        # 마지막 수 표시
+        # Draw last move indicator
         if self.last_move:
             self.draw_last_move_indicator()
         
@@ -244,7 +255,7 @@ class OthelloGUI:
                               stipple="gray25")
 
     def draw_last_move_indicator(self):
-        """마지막 수에 플레이어 표시를 그리는 메서드"""
+        """Draw last move indicator"""
         if not self.last_move:
             return
             
@@ -252,7 +263,7 @@ class OthelloGUI:
         x = self.margin + col * self.cell_size + self.cell_size // 2
         y = self.margin + row * self.cell_size + self.cell_size // 2
         
-        # 플레이어 타입에 따른 색상 설정
+        # Player type indicator
         text = player_type
         if self.board.board[row][col] == BLACK:
             text_color = "white"
@@ -261,11 +272,11 @@ class OthelloGUI:
             text_color = "black"
             bg_color = "#FF4444" if player_type == "HU" else "#4444FF"
         
-        # 배경 원 그리기
+        # Background circle
         self.canvas.create_oval(x - 12, y - 8, x + 12, y + 8,
                                fill=bg_color, outline="", stipple="gray50")
         
-        # 텍스트 그리기
+        # Text
         self.canvas.create_text(x, y, text=text, fill=text_color, 
                                font=("Arial", 8, "bold"))
 
@@ -285,7 +296,7 @@ class OthelloGUI:
         return None, None
 
     def handle_hover(self, event):
-        """Handle mouse hover to show preview"""
+        """Handle mouse hover"""
         if self.current_player != self.human_color or self.game_over or self.ai_thinking:
             return
             
@@ -314,7 +325,7 @@ class OthelloGUI:
         """Make a move and update the game state"""
         self.board = self.board.apply_move(x, y, color)
         
-        # 마지막 수 정보 업데이트 (인간 플레이어)
+        # Update last move info
         self.last_move = (x, y, "HU")
         
         self.current_player = opponent(self.current_player)
@@ -362,13 +373,12 @@ class OthelloGUI:
         self.ai_thinking = True
         self.progress.start()
         
-        # Update status to show AI is thinking
+        # Update status
         ai_color_str = self.color_to_string(self.ai.color)
         self.status_label.config(text=f"AI ({ai_color_str}) is thinking...")
 
         def think_and_move():
             try:
-                # UltraAdvancedAI의 get_move 메서드 호출
                 move = self.ai.get_move(self.board)
                 
                 # Schedule UI update on main thread
@@ -380,7 +390,7 @@ class OthelloGUI:
                         x, y = move
                         self.board = self.board.apply_move(x, y, self.ai.color)
                         
-                        # 마지막 수 정보 업데이트 (AI)
+                        # Update last move info
                         self.last_move = (x, y, "AI")
                         
                         self.current_player = opponent(self.current_player)
