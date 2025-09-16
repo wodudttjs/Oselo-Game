@@ -13,12 +13,15 @@ import pickle
 from dataclasses import dataclass
 from typing import Optional, Tuple, List, Dict
 import hashlib
+import math
+from zobrist import ZOBRIST_TABLE, ZOBRIST_TURN
+from config import load_config
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
 
-# Enhanced Zobrist hashing with incremental updates
-ZOBRIST_TABLE = np.random.randint(1, 2**63, size=(8, 8, 3), dtype=np.uint64)
-ZOBRIST_TURN = np.random.randint(1, 2**63, dtype=np.uint64)
+# Sentinel scores
+MATE_SCORE = 100000
+INF_SCORE = 10**9
 
 @dataclass
 class TTEntry:
@@ -28,6 +31,7 @@ class TTEntry:
     depth: int
     node_type: str  # 'exact', 'lowerbound', 'upperbound'
     age: int
+    pos_hash: int
     
 class BitBoard:
     """Bit-based board representation for ultra-fast operations"""
@@ -42,15 +46,363 @@ class BitBoard:
                         self.black |= (1 << pos)
                     elif board.board[i][j] == WHITE:
                         self.white |= (1 << pos)
+            self.hash_base = self._compute_hash_base_from_masks(self.black, self.white)
         else:
             self.black = 0x0000001008000000  # Initial black positions
             self.white = 0x0000000810000000  # Initial white positions
+            self.hash_base = self._compute_hash_base_from_masks(self.black, self.white)
     
     def get_empty_mask(self):
         return ~(self.black | self.white) & 0xFFFFFFFFFFFFFFFF
     
     def popcount(self, mask):
         return bin(mask).count('1')
+
+    @staticmethod
+    def _iter_bits(mask):
+        while mask:
+            lsb = mask & -mask
+            idx = (lsb.bit_length() - 1)
+            yield idx
+            mask ^= lsb
+
+    @staticmethod
+    def _compute_hash_base_from_masks(black_mask: int, white_mask: int) -> np.uint64:
+        h = np.uint64(0)
+        for idx in BitBoard._iter_bits(black_mask):
+            x, y = divmod(idx, 8)
+            h ^= ZOBRIST_TABLE[x][y][BLACK]
+        for idx in BitBoard._iter_bits(white_mask):
+            x, y = divmod(idx, 8)
+            h ^= ZOBRIST_TABLE[x][y][WHITE]
+        return h
+
+    # Directional masks for bitboard move generation
+    _MASK = 0xFFFFFFFFFFFFFFFF
+    _FILE_A = 0x0101010101010101
+    _FILE_H = 0x8080808080808080
+    _NOT_A = _MASK ^ _FILE_A
+    _NOT_H = _MASK ^ _FILE_H
+
+    @staticmethod
+    def _shift_n(bb): return (bb >> 8) & BitBoard._MASK
+    @staticmethod
+    def _shift_s(bb): return (bb << 8) & BitBoard._MASK
+    @staticmethod
+    def _shift_e(bb): return ((bb & BitBoard._NOT_H) << 1) & BitBoard._MASK
+    @staticmethod
+    def _shift_w(bb): return ((bb & BitBoard._NOT_A) >> 1) & BitBoard._MASK
+    @staticmethod
+    def _shift_ne(bb): return ((bb & BitBoard._NOT_H) >> 7) & BitBoard._MASK
+    @staticmethod
+    def _shift_nw(bb): return ((bb & BitBoard._NOT_A) >> 9) & BitBoard._MASK
+    @staticmethod
+    def _shift_se(bb): return ((bb & BitBoard._NOT_H) << 9) & BitBoard._MASK
+    @staticmethod
+    def _shift_sw(bb): return ((bb & BitBoard._NOT_A) << 7) & BitBoard._MASK
+
+    def _valid_moves_mask(self, own, opp):
+        empty = ~(own | opp) & BitBoard._MASK
+        moves = 0
+        for sh in (
+            self._shift_n, self._shift_s, self._shift_e, self._shift_w,
+            self._shift_ne, self._shift_nw, self._shift_se, self._shift_sw,
+        ):
+            x = sh(own) & opp
+            c = x
+            while c:
+                c = sh(c) & opp
+                x |= c
+            moves |= sh(x) & empty
+        return moves
+
+    def get_valid_moves_bitboard(self, color):
+        own = self.black if color == BLACK else self.white
+        opp = self.white if color == BLACK else self.black
+        mask = self._valid_moves_mask(own, opp)
+        moves = []
+        while mask:
+            lsb = mask & -mask
+            idx = (lsb.bit_length() - 1)
+            x, y = divmod(idx, 8)
+            moves.append((x, y))
+            mask ^= lsb
+        return moves
+
+    def _flip_mask_for_move(self, own, opp, move_bit):
+        flips = 0
+        for sh in (
+            self._shift_n, self._shift_s, self._shift_e, self._shift_w,
+            self._shift_ne, self._shift_nw, self._shift_se, self._shift_sw,
+        ):
+            x = 0
+            c = sh(move_bit)
+            while c and (c & opp):
+                x |= c
+                c = sh(c)
+            if c and (c & own):
+                flips |= x
+        return flips
+
+    def apply_move_bitboard(self, x, y, color):
+        idx = x * 8 + y
+        move_bit = 1 << idx
+        own = self.black if color == BLACK else self.white
+        opp = self.white if color == BLACK else self.black
+        flips = self._flip_mask_for_move(own, opp, move_bit)
+        if flips == 0:
+            return None  # illegal
+        own ^= flips | move_bit
+        opp ^= flips
+        bb = BitBoard()
+        if color == BLACK:
+            bb.black, bb.white = own, opp
+        else:
+            bb.white, bb.black = own, opp
+        # Incremental hash update
+        base = np.uint64(self.hash_base)
+        base ^= ZOBRIST_TABLE[x][y][color]
+        opp_color = opponent(color)
+        for fidx in BitBoard._iter_bits(flips):
+            fx, fy = divmod(fidx, 8)
+            base ^= ZOBRIST_TABLE[fx][fy][opp_color]
+            base ^= ZOBRIST_TABLE[fx][fy][color]
+        bb.hash_base = base
+        return bb
+
+
+# ---------------- Modular Evaluator and SearchEngine ----------------
+
+class Evaluator:
+    def __init__(self):
+        pass
+
+    def evaluate_bitboard(self, bb: BitBoard, ai_color: int) -> int:
+        empty = 64 - bb.popcount(bb.black | bb.white)
+        my = bb.black if ai_color == BLACK else bb.white
+        op = bb.white if ai_color == BLACK else bb.black
+        disc_diff = bb.popcount(my) - bb.popcount(op)
+        my_moves = len(bb.get_valid_moves_bitboard(ai_color))
+        op_moves = len(bb.get_valid_moves_bitboard(opponent(ai_color)))
+        mobility = 0
+        tot_moves = my_moves + op_moves
+        if tot_moves:
+            mobility = (my_moves - op_moves) / tot_moves
+        corner_idx = [(0,0),(0,7),(7,0),(7,7)]
+        corners = 0
+        for (cx, cy) in corner_idx:
+            ci = cx*8+cy
+            mask = 1 << ci
+            if my & mask:
+                corners += 1
+            elif op & mask:
+                corners -= 1
+        score = 0
+        score += corners * 1000
+        score += mobility * 200
+        score += disc_diff * 10
+        if empty > 50:
+            score *= 1.2
+        elif empty <= 20:
+            score *= 0.8
+        return int(score)
+
+
+class SearchEngine:
+    def __init__(self, evaluator: Evaluator, tt_size: int, time_limit: float):
+        self.evaluator = evaluator
+        self.tt = {}
+        self.tt_age = 0
+        self.max_tt_size = tt_size
+        self.killer_moves = defaultdict(list)
+        self.counter_moves = {}
+        self.history_table = np.zeros((8, 8), dtype=np.int32)
+        self.nodes_searched = 0
+        self.tt_hits = 0
+        self.cutoffs = 0
+        self.time_limit = time_limit
+
+    @staticmethod
+    def bit_pos_hash(bb: BitBoard) -> int:
+        return int(getattr(bb, 'hash_base', 0))
+
+    @staticmethod
+    def bit_hash(bb: BitBoard, side_to_move: int) -> int:
+        return int(np.uint64(SearchEngine.bit_pos_hash(bb)) ^ (ZOBRIST_TURN if side_to_move == BLACK else np.uint64(0)))
+
+    def _static_move_value_bb(self, move, bb: BitBoard):
+        x, y = move
+        score = 0
+        if move in CORNERS:
+            score += 1000
+        elif move in X_SQUARES:
+            score -= 200
+        elif move in C_SQUARES:
+            score -= 200
+        elif x == 0 or x == 7 or y == 0 or y == 7:
+            score += 100
+        return score
+
+    def enhanced_move_ordering_bb(self, ai_color: int, bb: BitBoard, moves, depth, prev_best=None):
+        if not moves:
+            return []
+        move_scores = []
+        for i, move in enumerate(moves):
+            score = 0
+            if prev_best and move == prev_best:
+                score += 10000
+            tt_entry = self.tt.get(SearchEngine.bit_hash(bb, ai_color))
+            if tt_entry and tt_entry.move == move:
+                score += 8000
+            if depth in self.killer_moves and move in self.killer_moves[depth]:
+                score += 4000 + (2 - self.killer_moves[depth].index(move)) * 1000
+            x, y = move
+            total_history = max(1, int(np.sum(self.history_table)))
+            history_score = (int(self.history_table[x][y]) * 2000) // total_history
+            score += history_score
+            score += self._static_move_value_bb(move, bb)
+            idx = x * 8 + y
+            mv_bit = 1 << idx
+            own = bb.black if ai_color == BLACK else bb.white
+            opp = bb.white if ai_color == BLACK else bb.black
+            flips = bb._flip_mask_for_move(own, opp, mv_bit)
+            score += bin(flips).count('1') * 50
+            move_scores.append((score, i, move))
+        move_scores.sort(reverse=True)
+        return [m for _, _, m in move_scores]
+
+    def alpha_beta_bb(self, ai_color: int, bb: BitBoard, depth: int, alpha: float, beta: float, side_to_move: int, start_time: float):
+        self.nodes_searched += 1
+        if self.nodes_searched % 4096 == 0:
+            if time.time() - start_time > self.time_limit * 0.95:
+                return self.evaluator.evaluate_bitboard(bb, ai_color), None
+        key = SearchEngine.bit_hash(bb, side_to_move)
+        tt_entry = self.tt.get(key)
+        tt_move = None
+        if tt_entry and tt_entry.depth >= depth and SearchEngine.bit_pos_hash(bb) == tt_entry.pos_hash:
+            self.tt_hits += 1
+            if tt_entry.node_type == 'exact':
+                return tt_entry.score, tt_entry.move
+            elif tt_entry.node_type == 'lowerbound' and tt_entry.score >= beta:
+                return tt_entry.score, tt_entry.move
+            elif tt_entry.node_type == 'upperbound' and tt_entry.score <= alpha:
+                return tt_entry.score, tt_entry.move
+            tt_move = tt_entry.move
+        moves = bb.get_valid_moves_bitboard(side_to_move)
+        if depth == 0 or not moves:
+            if not moves:
+                opp = opponent(side_to_move)
+                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                    bcnt = bb.popcount(bb.black)
+                    wcnt = bb.popcount(bb.white)
+                    diff = (bcnt - wcnt) if ai_color == BLACK else (wcnt - bcnt)
+                    return MATE_SCORE * (1 if diff > 0 else -1 if diff < 0 else 0), None
+                return self.alpha_beta_bb(ai_color, bb, depth, alpha, beta, opp, start_time)
+            return self.evaluator.evaluate_bitboard(bb, ai_color), None
+        ordered = self.enhanced_move_ordering_bb(ai_color, bb, moves, depth, tt_move)
+        best_move = ordered[0] if ordered else None
+        best_score = float('-inf')
+        original_alpha = alpha
+        opp_color = opponent(side_to_move)
+        for i, move in enumerate(ordered):
+            x, y = move
+            next_bb = bb.apply_move_bitboard(x, y, side_to_move)
+            if next_bb is None:
+                continue
+            if i == 0:
+                score, _ = self.alpha_beta_bb(ai_color, next_bb, depth - 1, -beta, -alpha, opp_color, start_time)
+                score = -score
+            else:
+                score, _ = self.alpha_beta_bb(ai_color, next_bb, depth - 1, -alpha - 1, -alpha, opp_color, start_time)
+                score = -score
+                if alpha < score < beta:
+                    score, _ = self.alpha_beta_bb(ai_color, next_bb, depth - 1, -beta, -score, opp_color, start_time)
+                    score = -score
+            if score > best_score:
+                best_score = score
+                best_move = move
+            alpha = max(alpha, score)
+            if beta <= alpha:
+                self.cutoffs += 1
+                if len(self.killer_moves[depth]) >= 2:
+                    self.killer_moves[depth].pop(0)
+                self.killer_moves[depth].append(move)
+                hx, hy = move
+                self.history_table[hx][hy] += depth * depth
+                break
+        node_type = 'exact'
+        if best_score <= original_alpha:
+            node_type = 'upperbound'
+        elif best_score >= beta:
+            node_type = 'lowerbound'
+        if not math.isfinite(best_score):
+            best_score = MATE_SCORE if best_score > 0 else -MATE_SCORE
+        if len(self.tt) >= self.max_tt_size:
+            try:
+                evict_key = min(self.tt, key=lambda k: (self.tt[k].age, self.tt[k].depth))
+                self.tt.pop(evict_key, None)
+            except ValueError:
+                pass
+        self.tt[key] = TTEntry(
+            score=best_score,
+            move=best_move,
+            depth=depth,
+            node_type=node_type,
+            age=self.tt_age,
+            pos_hash=SearchEngine.bit_pos_hash(bb)
+        )
+        return best_score, best_move
+
+    def get_best_move(self, board: Board, ai_color: int, max_depth: int):
+        start_time = time.time()
+        bb = BitBoard(board)
+        moves = bb.get_valid_moves_bitboard(ai_color)
+        if not moves:
+            return None
+        if len(moves) == 1:
+            return moves[0]
+        best_move = None
+        prev_score = 0
+        aspiration = 50
+        for depth in range(1, max_depth + 1):
+            try:
+                self.nodes_searched = 0
+                self.tt_hits = 0
+                self.cutoffs = 0
+                self.tt_age += 1
+                depth_start = time.time()
+                if depth >= 4 and best_move:
+                    alpha = prev_score - aspiration
+                    beta = prev_score + aspiration
+                    score, move = self.alpha_beta_bb(ai_color, bb, depth, alpha, beta, ai_color, start_time)
+                    if score <= alpha:
+                        score, move = self.alpha_beta_bb(ai_color, bb, depth, float('-inf'), beta, ai_color, start_time)
+                    elif score >= beta:
+                        score, move = self.alpha_beta_bb(ai_color, bb, depth, alpha, float('inf'), ai_color, start_time)
+                    aspiration = min(100, aspiration + 25)
+                else:
+                    score, move = self.alpha_beta_bb(ai_color, bb, depth, float('-inf'), float('inf'), ai_color, start_time)
+                if move:
+                    best_move = move
+                    prev_score = score
+                depth_time = time.time() - depth_start
+                logging.info(f"[Search] Depth {depth}: {depth_time:.3f}s, {self.nodes_searched} nodes, TT: {self.tt_hits}, Score: {score}, Move: {move}")
+                if math.isfinite(score) and abs(score) >= MATE_SCORE:
+                    logging.info("Terminal score - stopping")
+                    break
+                if time.time() - start_time > self.time_limit * 0.8:
+                    logging.info("Time budget nearly used - stop")
+                    break
+            except Exception as e:
+                logging.error(f"[Search] Error at depth {depth}: {e}")
+                break
+        return best_move
+
+    def evaluate_bitboard(self, color):
+        own = self.black if color == BLACK else self.white
+        opp = self.white if color == BLACK else self.black
+        # Simple disc differential
+        return self.popcount(own) - self.popcount(opp)
 
 class UltraAdvancedAI:
     def __init__(self, color, difficulty='hard', time_limit=10.0):
@@ -104,6 +456,233 @@ class UltraAdvancedAI:
             
         # Pre-computed patterns for ultra-fast evaluation
         self._precompute_patterns()
+
+        # Load configuration and instantiate modular components
+        cfg = load_config()
+        self.config = cfg
+        # Apply config values
+        self.max_tt_size = cfg.get('tt_size', self.max_tt_size)
+        self.time_limit = cfg.get('time_limit', self.time_limit)
+        if 'difficulties' in cfg and isinstance(cfg['difficulties'], dict):
+            d = cfg['difficulties'].get(self.difficulty, {})
+            self.max_depth = d.get('max_depth', self.max_depth)
+            self.use_parallel = d.get('use_parallel', getattr(self, 'use_parallel', False))
+
+        # Modular evaluator and search engine
+        self.evaluator = Evaluator()
+        self.search_engine = SearchEngine(self.evaluator, self.max_tt_size, self.time_limit)
+
+    
+
+    # -------- Bitboard helpers (hashing, ordering, evaluation) --------
+
+    def bit_pos_hash(self, bb: BitBoard) -> int:
+        return int(getattr(bb, 'hash_base', 0))
+
+    def bit_hash(self, bb: BitBoard, side_to_move: int) -> int:
+        base = np.uint64(self.bit_pos_hash(bb))
+        return int(base ^ (ZOBRIST_TURN if side_to_move == BLACK else np.uint64(0)))
+
+    def _static_move_value_bb(self, move, bb: BitBoard):
+        x, y = move
+        score = 0
+        if move in CORNERS:
+            score += 1000
+        elif move in X_SQUARES:
+            # X-square penalty unless adjacent corner is owned
+            adjacent_corners = [(cx, cy) for cx, cy in CORNERS
+                                if abs(cx - x) <= 1 and abs(cy - y) <= 1]
+            # We don't track colors per-square here; approximate using neutral penalty
+            score -= 200
+        elif move in C_SQUARES:
+            score -= 200
+        elif x == 0 or x == 7 or y == 0 or y == 7:
+            score += 100
+        return score
+
+    def enhanced_move_ordering_bb(self, bb: BitBoard, moves, depth, prev_best=None):
+        if not moves:
+            return []
+        move_scores = []
+        for i, move in enumerate(moves):
+            score = 0
+            if prev_best and move == prev_best:
+                score += 10000
+
+            # TT best move bonus
+            tt_entry = self.tt.get(self.bit_hash(bb, self.color))
+            if tt_entry and tt_entry.move == move:
+                score += 8000
+
+            # Killer moves
+            if depth in self.killer_moves and move in self.killer_moves[depth]:
+                score += 4000 + (2 - self.killer_moves[depth].index(move)) * 1000
+
+            # History heuristic
+            x, y = move
+            total_history = max(1, int(np.sum(self.history_table)))
+            history_score = (int(self.history_table[x][y]) * 2000) // total_history
+            score += history_score
+
+            # Static position value
+            score += self._static_move_value_bb(move, bb)
+
+            # Flip count bonus via bitboard
+            idx = x * 8 + y
+            mv_bit = 1 << idx
+            own = bb.black if self.color == BLACK else bb.white
+            opp = bb.white if self.color == BLACK else bb.black
+            flips = bb._flip_mask_for_move(own, opp, mv_bit)
+            score += bin(flips).count('1') * 50
+
+            move_scores.append((score, i, move))
+
+        move_scores.sort(reverse=True)
+        return [m for _, _, m in move_scores]
+
+    def evaluate_bitboard(self, bb: BitBoard):
+        # Opening/Mid/End phase weight via empties
+        empty = 64 - bb.popcount(bb.black | bb.white)
+        # Features
+        # Disc differential
+        my = bb.black if self.color == BLACK else bb.white
+        op = bb.white if self.color == BLACK else bb.black
+        disc_diff = bb.popcount(my) - bb.popcount(op)
+        # Mobility
+        my_moves = len(bb.get_valid_moves_bitboard(self.color))
+        op_moves = len(bb.get_valid_moves_bitboard(opponent(self.color)))
+        mobility = 0
+        tot_moves = my_moves + op_moves
+        if tot_moves:
+            mobility = (my_moves - op_moves) / tot_moves
+        # Corner control (check the 4 corners occupancy by masks)
+        corner_idx = [(0,0),(0,7),(7,0),(7,7)]
+        corners = 0
+        for (cx, cy) in corner_idx:
+            ci = cx*8+cy
+            mask = 1 << ci
+            if my & mask:
+                corners += 1
+            elif op & mask:
+                corners -= 1
+        # Combine
+        score = 0
+        score += corners * 1000
+        score += mobility * 200
+        score += disc_diff * 10
+        # Phase scaling
+        if empty > 50:
+            score *= 1.2
+        elif empty <= 20:
+            score *= 0.8
+        return int(score)
+
+    # -------- Bitboard Alpha-Beta (Negamax) --------
+
+    def alpha_beta_bb(self, bb: BitBoard, depth: int, alpha: float, beta: float, side_to_move: int, start_time: float):
+        self.nodes_searched += 1
+
+        if self.nodes_searched % 4096 == 0:
+            if time.time() - start_time > self.time_limit * 0.95:
+                return self.evaluate_bitboard(bb), None
+
+        # TT probe
+        key = self.bit_hash(bb, side_to_move)
+        tt_entry = self.tt.get(key)
+        tt_move = None
+        if tt_entry and tt_entry.depth >= depth and self.bit_pos_hash(bb) == tt_entry.pos_hash:
+            self.tt_hits += 1
+            if tt_entry.node_type == 'exact':
+                return tt_entry.score, tt_entry.move
+            elif tt_entry.node_type == 'lowerbound' and tt_entry.score >= beta:
+                return tt_entry.score, tt_entry.move
+            elif tt_entry.node_type == 'upperbound' and tt_entry.score <= alpha:
+                return tt_entry.score, tt_entry.move
+            tt_move = tt_entry.move
+
+        # Generate moves
+        moves = bb.get_valid_moves_bitboard(side_to_move)
+
+        # Terminal or leaf
+        if depth == 0 or not moves:
+            if not moves:
+                # Pass if opponent has moves; else game over
+                opp = opponent(side_to_move)
+                if not BitBoard(bb).get_valid_moves_bitboard(opp):
+                    # Terminal: final score by disc diff
+                    bcnt = bb.popcount(bb.black)
+                    wcnt = bb.popcount(bb.white)
+                    diff = (bcnt - wcnt) if self.color == BLACK else (wcnt - bcnt)
+                    return MATE_SCORE * (1 if diff > 0 else -1 if diff < 0 else 0), None
+                # Pass move: do not decrease depth
+                return self.alpha_beta_bb(bb, depth, alpha, beta, opp, start_time)
+            return self.evaluate_bitboard(bb), None
+
+        # Ordering
+        ordered = self.enhanced_move_ordering_bb(bb, moves, depth, tt_move)
+
+        best_move = ordered[0] if ordered else None
+        best_score = float('-inf')
+        original_alpha = alpha
+        opp_color = opponent(side_to_move)
+
+        for i, move in enumerate(ordered):
+            x, y = move
+            next_bb = bb.apply_move_bitboard(x, y, side_to_move)
+            if next_bb is None:
+                continue
+
+            # PVS windowing
+            if i == 0:
+                score, _ = self.alpha_beta_bb(next_bb, depth - 1, -beta, -alpha, opp_color, start_time)
+                score = -score
+            else:
+                score, _ = self.alpha_beta_bb(next_bb, depth - 1, -alpha - 1, -alpha, opp_color, start_time)
+                score = -score
+                if alpha < score < beta:
+                    score, _ = self.alpha_beta_bb(next_bb, depth - 1, -beta, -score, opp_color, start_time)
+                    score = -score
+
+            if score > best_score:
+                best_score = score
+                best_move = move
+            alpha = max(alpha, score)
+
+            if beta <= alpha:
+                self.cutoffs += 1
+                # killer move
+                if len(self.killer_moves[depth]) >= 2:
+                    self.killer_moves[depth].pop(0)
+                self.killer_moves[depth].append(move)
+                # history
+                hx, hy = move
+                self.history_table[hx][hy] += depth * depth
+                break
+
+        # TT store
+        node_type = 'exact'
+        if best_score <= original_alpha:
+            node_type = 'upperbound'
+        elif best_score >= beta:
+            node_type = 'lowerbound'
+        if not math.isfinite(best_score):
+            best_score = MATE_SCORE if best_score > 0 else -MATE_SCORE
+        if len(self.tt) >= self.max_tt_size:
+            try:
+                evict_key = min(self.tt, key=lambda k: (self.tt[k].age, self.tt[k].depth))
+                self.tt.pop(evict_key, None)
+            except ValueError:
+                pass
+        self.tt[key] = TTEntry(
+            score=best_score,
+            move=best_move,
+            depth=depth,
+            node_type=node_type,
+            age=self.tt_age,
+            pos_hash=self.bit_pos_hash(bb)
+        )
+
+        return best_score, best_move
 
     def _initialize_patterns(self):
         """Initialize pattern-based evaluation weights"""
@@ -159,22 +738,9 @@ class UltraAdvancedAI:
         return score
 
     def zobrist_hash_incremental(self, board, move=None, color=None):
-        """Incremental zobrist hashing for speed"""
-        if not hasattr(board, '_zobrist_hash'):
-            h = np.uint64(0)
-            for i in range(8):
-                for j in range(8):
-                    piece = board.board[i][j]
-                    if piece != EMPTY:
-                        h ^= ZOBRIST_TABLE[i][j][piece]
-            board._zobrist_hash = h
-        
-        if move and color:
-            # Update hash incrementally
-            x, y = move
-            board._zobrist_hash ^= ZOBRIST_TABLE[x][y][color]
-            
-        return board._zobrist_hash
+        """Deprecated: kept for compatibility. Use zobrist_hash instead."""
+        stm = color if color is not None else self.color
+        return self.zobrist_hash(board, stm)
 
     def quiescence_search(self, board, alpha, beta, depth=0, max_depth=4):
         """Quiescence search to avoid horizon effect"""
@@ -211,7 +777,7 @@ class UltraAdvancedAI:
             return True
         # Check if move captures many pieces
         new_board = board.apply_move(x, y, self.color)
-        captured = abs(new_board.count_stones()[0] - board.count_stones()[0] - 1)
+        captured = len(new_board.move_history[-1][3])
         return captured >= 3
 
     def late_move_reduction(self, depth, move_index, moves_count):
@@ -226,7 +792,11 @@ class UltraAdvancedAI:
         if depth >= 3:
             # Skip turn and search with reduced depth
             R = 2 if depth > 6 else 1  # Reduction factor
-            score = -self.alpha_beta_enhanced(board, depth - 1 - R, -beta, -beta + 1, False, time.time())
+            # alpha_beta_enhanced returns (score, move); extract score then negate
+            score, _ = self.alpha_beta_enhanced(
+                board, depth - 1 - R, -beta, -beta + 1, False, time.time()
+            )
+            score = -score
             if score >= beta:
                 return True
         return False
@@ -236,7 +806,7 @@ class UltraAdvancedAI:
         if board.get_empty_count() == 0:
             b, w = board.count_stones()
             diff = (b - w) if self.color == BLACK else (w - b)
-            return 10000 * (1 if diff > 0 else -1 if diff < 0 else 0)
+            return MATE_SCORE * (1 if diff > 0 else -1 if diff < 0 else 0)
 
         score = 0
         empty_count = board.get_empty_count()
@@ -323,7 +893,23 @@ class UltraAdvancedAI:
             score += pattern_score
         return score
 
-    def enhanced_move_ordering(self, board, moves, depth, prev_best=None):
+    def zobrist_hash(self, board, side_to_move):
+        """Return Zobrist hash including side-to-move.
+        Board maintains an incremental piece-hash; we XOR a turn key based on side_to_move.
+        """
+        base = getattr(board, '_zobrist_hash', None)
+        if base is None:
+            h = np.uint64(0)
+            for i in range(8):
+                for j in range(8):
+                    piece = board.board[i][j]
+                    if piece != EMPTY:
+                        h ^= ZOBRIST_TABLE[i][j][piece]
+            board._zobrist_hash = h
+            base = h
+        return np.uint64(base) ^ (ZOBRIST_TURN if side_to_move == BLACK else np.uint64(0))
+
+    def enhanced_move_ordering(self, board, moves, depth, prev_best=None, side_to_move=None):
         """Multi-stage enhanced move ordering"""
         if not moves:
             return []
@@ -338,7 +924,8 @@ class UltraAdvancedAI:
                 score += 10000
             
             # Transposition table move
-            tt_entry = self.tt.get(self.zobrist_hash_incremental(board))
+            stm = side_to_move if side_to_move is not None else self.color
+            tt_entry = self.tt.get(self.zobrist_hash(board, stm))
             if tt_entry and tt_entry.move == move:
                 score += 8000
             
@@ -363,7 +950,7 @@ class UltraAdvancedAI:
             
             # Capture bonus
             new_board = board.apply_move(*move, self.color)
-            captured = abs(new_board.count_stones()[0] - board.count_stones()[0] - 1)
+            captured = len(new_board.move_history[-1][3])
             score += captured * 50
             
             move_scores.append((score, i, move))
@@ -403,12 +990,14 @@ class UltraAdvancedAI:
             if time.time() - start_time > self.time_limit * 0.95:
                 return self.evaluate_board_neural(board), None
         
-        # Transposition table lookup
-        board_hash = self.zobrist_hash_incremental(board)
+        # Transposition table lookup (hash includes side-to-move)
+        current_color = self.color if maximizing else opponent(self.color)
+        board_hash = self.zobrist_hash(board, current_color)
         tt_entry = self.tt.get(board_hash)
         tt_move = None
         
-        if tt_entry and tt_entry.depth >= depth:
+        # Collision verification by matching position hash
+        if tt_entry and tt_entry.depth >= depth and getattr(board, '_zobrist_hash', None) == tt_entry.pos_hash:
             self.tt_hits += 1
             if tt_entry.node_type == 'exact':
                 return tt_entry.score, tt_entry.move
@@ -418,6 +1007,7 @@ class UltraAdvancedAI:
                 return tt_entry.score, tt_entry.move
             tt_move = tt_entry.move
         
+        # Move generation for the current side
         current_color = self.color if maximizing else opponent(self.color)
         moves = board.get_valid_moves(current_color)
         
@@ -435,12 +1025,12 @@ class UltraAdvancedAI:
                     return self.quiescence_search(board, alpha, beta), None
                 return self.evaluate_board_neural(board), None
         
-        # Null move pruning
-        if not maximizing and depth >= 3 and self.null_move_pruning(board, depth, beta):
+        # Null move pruning (only when beta is finite to avoid returning inf)
+        if not maximizing and depth >= 3 and (beta < float('inf')) and self.null_move_pruning(board, depth, beta):
             return beta, None
         
         # Enhanced move ordering
-        ordered_moves = self.enhanced_move_ordering(board, moves, depth, tt_move)
+        ordered_moves = self.enhanced_move_ordering(board, moves, depth, tt_move, side_to_move=current_color)
         
         best_move = ordered_moves[0] if ordered_moves else None
         best_score = float('-inf') if maximizing else float('inf')
@@ -503,21 +1093,31 @@ class UltraAdvancedAI:
                 
                 break
         
-        # Store in transposition table
-        if len(self.tt) < self.max_tt_size:
-            node_type = 'exact'
-            if best_score <= original_alpha:
-                node_type = 'upperbound'
-            elif best_score >= beta:
-                node_type = 'lowerbound'
-            
-            self.tt[board_hash] = TTEntry(
-                score=best_score,
-                move=best_move,
-                depth=depth,
-                node_type=node_type,
-                age=self.tt_age
-            )
+        # Store in transposition table with simple replacement policy
+        node_type = 'exact'
+        if best_score <= original_alpha:
+            node_type = 'upperbound'
+        elif best_score >= beta:
+            node_type = 'lowerbound'
+
+        if not math.isfinite(best_score):
+            best_score = MATE_SCORE if best_score > 0 else -MATE_SCORE
+
+        if len(self.tt) >= self.max_tt_size:
+            try:
+                evict_key = min(self.tt, key=lambda k: (self.tt[k].age, self.tt[k].depth))
+                self.tt.pop(evict_key, None)
+            except ValueError:
+                pass
+
+        self.tt[board_hash] = TTEntry(
+            score=best_score,
+            move=best_move,
+            depth=depth,
+            node_type=node_type,
+            age=self.tt_age,
+            pos_hash=int(getattr(board, '_zobrist_hash', 0))
+        )
         
         return best_score, best_move
 
@@ -533,7 +1133,7 @@ class UltraAdvancedAI:
             return moves[0]
         
         # Opening book check
-        board_hash = self.zobrist_hash_incremental(board)
+        board_hash = self.zobrist_hash(board, self.color)
         if board_hash in self.opening_book:
             return self.opening_book[board_hash]
         
@@ -577,7 +1177,7 @@ class UltraAdvancedAI:
                            f"TT hits: {self.tt_hits}, Score: {score}, Move: {move}")
                 
                 # Early termination conditions
-                if abs(score) > 9000:  # Mate found
+                if math.isfinite(score) and abs(score) >= MATE_SCORE:  # Mate found
                     logging.info("Mate score - early termination")
                     break
                     
@@ -590,12 +1190,69 @@ class UltraAdvancedAI:
                 break
         
         total_time = time.time() - start_time
-        total_nodes = sum(self.nodes_searched for _ in range(depth))
-        nps = total_nodes / max(total_time, 0.001)
+        # Estimate nodes per second using last depth's count (already logged per depth)
+        nps = self.nodes_searched / max(total_time, 0.001)
         
         logging.info(f"[Ultimate AI Complete] Time: {total_time:.3f}s, "
                     f"NPS: {nps:.0f}, Best: {best_move}")
         
+        return best_move
+
+    def iterative_deepening_bitboard(self, board):
+        start_time = time.time()
+        bb = BitBoard(board)
+        moves = bb.get_valid_moves_bitboard(self.color)
+        if not moves:
+            return None
+        if len(moves) == 1:
+            return moves[0]
+
+        # Opening book check
+        key = self.bit_hash(bb, self.color)
+        if key in self.opening_book:
+            return self.opening_book[key]
+
+        logging.info(f"[BB AI] Starting search: max_depth={self.max_depth}, moves={len(moves)}")
+        best_move = None
+        prev_score = 0
+        aspiration = 50
+        for depth in range(1, self.max_depth + 1):
+            try:
+                self.nodes_searched = 0
+                self.tt_hits = 0
+                self.cutoffs = 0
+                self.tt_age += 1
+                depth_start = time.time()
+
+                if depth >= 4 and best_move:
+                    alpha = prev_score - aspiration
+                    beta = prev_score + aspiration
+                    score, move = self.alpha_beta_bb(bb, depth, alpha, beta, self.color, start_time)
+                    if score <= alpha:
+                        score, move = self.alpha_beta_bb(bb, depth, float('-inf'), beta, self.color, start_time)
+                    elif score >= beta:
+                        score, move = self.alpha_beta_bb(bb, depth, alpha, float('inf'), self.color, start_time)
+                    aspiration = min(100, aspiration + 25)
+                else:
+                    score, move = self.alpha_beta_bb(bb, depth, float('-inf'), float('inf'), self.color, start_time)
+
+                if move:
+                    best_move = move
+                    prev_score = score
+
+                depth_time = time.time() - depth_start
+                logging.info(f"[BB] Depth {depth}: {depth_time:.3f}s, {self.nodes_searched} nodes, TT: {self.tt_hits}, Score: {score}, Move: {move}")
+
+                if math.isfinite(score) and abs(score) >= MATE_SCORE:
+                    logging.info("Mate-like terminal score - stopping")
+                    break
+                if time.time() - start_time > self.time_limit * 0.8:
+                    logging.info("Time budget nearly used - stop")
+                    break
+            except Exception as e:
+                logging.error(f"[BB] Error at depth {depth}: {e}")
+                break
+
         return best_move
 
     def perfect_endgame_solver(self, board, depth_remaining):
@@ -646,5 +1303,9 @@ class UltraAdvancedAI:
             logging.info(f"Perfect endgame move: {move}")
             return move
         
-        # Use ultimate iterative deepening
+        # Use bitboard search via SearchEngine
+        move = self.search_engine.get_best_move(board, self.color, self.max_depth)
+        if move is not None:
+            return move
+        # Fallback
         return self.iterative_deepening_ultimate(board)

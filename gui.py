@@ -1,7 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 from board import Board
-from ai import AdvancedAI
+from ai import UltraAdvancedAI
 from constants import BLACK, WHITE, EMPTY, opponent, CORNERS
 import threading
 
@@ -99,7 +99,7 @@ class OthelloGUI:
         # Create AI with selected difficulty
         difficulty = self.difficulty_var.get()
         ai_color = WHITE if self.human_color == BLACK else BLACK
-        self.ai = AdvancedAI(ai_color, difficulty)
+        self.ai = UltraAdvancedAI(ai_color, difficulty)
 
     def new_game(self):
         """Start a new game"""

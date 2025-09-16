@@ -1,4 +1,6 @@
 from constants import EMPTY, BLACK, WHITE, opponent, CORNERS
+from zobrist import ZOBRIST_TABLE
+import numpy as np
 import copy
 
 class Board:
@@ -10,6 +12,17 @@ class Board:
         self.board[4][3] = BLACK
         self.board[4][4] = WHITE
         self.move_history = []
+        # Initialize Zobrist hash for the starting position
+        self._zobrist_hash = self._compute_zobrist()
+
+    def _compute_zobrist(self):
+        h = np.uint64(0)
+        for i in range(8):
+            for j in range(8):
+                piece = self.board[i][j]
+                if piece != EMPTY:
+                    h ^= ZOBRIST_TABLE[i][j][piece]
+        return h
 
     def in_bounds(self, x, y):
         return 0 <= x < self.size and 0 <= y < self.size
@@ -46,7 +59,7 @@ class Board:
         new_board = copy.deepcopy(self)
         new_board.board[x][y] = color
         flipped = []
-        
+
         directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
         for dx, dy in directions:
             nx, ny = x + dx, y + dy
@@ -61,7 +74,16 @@ class Board:
                 for fx, fy in to_flip:
                     new_board.board[fx][fy] = color
                 flipped.extend(to_flip)
-            
+
+        # Incremental Zobrist hash update
+        # Place the new piece at (x, y)
+        new_board._zobrist_hash ^= ZOBRIST_TABLE[x][y][color]
+        # Apply flips: toggle opponent -> color
+        opp = opponent(color)
+        for fx, fy in flipped:
+            new_board._zobrist_hash ^= ZOBRIST_TABLE[fx][fy][opp]
+            new_board._zobrist_hash ^= ZOBRIST_TABLE[fx][fy][color]
+
         new_board.move_history = self.move_history + [(x, y, color, flipped)]
         return new_board
 
@@ -72,6 +94,11 @@ class Board:
         
     def get_empty_count(self):
         return sum(row.count(EMPTY) for row in self.board)
+        
+    def count_score(self, color):
+        """Return disc differential from the given color's perspective."""
+        b, w = self.count_stones()
+        return (b - w) if color == BLACK else (w - b)
         
     def is_stable(self, x, y):
         """Check if a stone at position (x, y) is stable"""
