@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 import math
-import random
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from config import load_config
+from zobrist import ZOBRIST_TABLE, ZOBRIST_TURN
 from constants import (
     adjust_position_weight,
     BLACK,
@@ -32,14 +32,7 @@ logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s', date
 MATE_SCORE = 100_000
 INF_SCORE = 10**9
 
-# ---- Zobrist (deterministic, in-module; avoids external collisions) ----
-_rng = random.Random(1337)
-ZOBRIST_TABLE: List[List[List[np.uint64]]] = [[[np.uint64(0) for _ in range(3)] for _ in range(8)] for _ in range(8)]
-for i in range(8):
-    for j in range(8):
-        ZOBRIST_TABLE[i][j][BLACK] = np.uint64(_rng.getrandbits(64) or 1)
-        ZOBRIST_TABLE[i][j][WHITE] = np.uint64(_rng.getrandbits(64) or 1)
-ZOBRIST_TURN: np.uint64 = np.uint64(_rng.getrandbits(64) or 1)
+# ---- Zobrist (centralized in zobrist.py) ----
 
 DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1))
 
@@ -459,13 +452,19 @@ class SearchEngine:
             if alpha >= beta:
                 break
 
-        # store PV root to TT as well
+        # store PV root to TT as well (respect TT size cap)
         key = self.bit_hash(bb, ai_color)
         node_type = 'exact'
         if best_score <= original_alpha:
             node_type = 'upperbound'
         elif best_score >= beta:
             node_type = 'lowerbound'
+        if len(self.tt) >= self.max_tt_size:
+            try:
+                evict_key = min(self.tt, key=lambda k: (self.tt[k].age, self.tt[k].depth))
+                self.tt.pop(evict_key, None)
+            except ValueError:
+                pass
         self.tt[key] = TTEntry(
             score=int(best_score),
             move=best_move,
@@ -712,3 +711,25 @@ class UltraAdvancedAI:
         # Let the engine search, restricted to root candidates
         move = self.search_engine.get_best_move(board, side, self.max_depth, root_moves=candidates)
         return move
+
+    # ---- standardized AI interface ----
+    def set_difficulty(self, level: str) -> None:
+        """Set difficulty profile and adjust max depth accordingly."""
+        self.difficulty = level
+        # Default mapping in case config lacks profile
+        default_map = {'easy': 6, 'medium': 8, 'hard': 10}
+        depth = default_map.get(level, self.max_depth)
+        dcfg = self.config.get('difficulties', {})
+        if isinstance(dcfg, dict):
+            depth = dcfg.get(level, {}).get('max_depth', depth)
+        self.max_depth = int(depth)
+
+    def set_time_limit(self, seconds: float) -> None:
+        """Update time budget and propagate to the search engine."""
+        try:
+            self.time_limit = float(seconds)
+        except Exception:
+            return
+        # Keep config in sync for callers that re-read it later
+        self.config['time_limit'] = self.time_limit
+        self.search_engine.time_limit = self.time_limit
