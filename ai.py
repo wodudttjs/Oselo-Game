@@ -193,38 +193,360 @@ class BitBoard:
 
 
 class Evaluator:
+    """고급 오델로 평가함수 - 실전 전략을 반영한 종합적 평가"""
+    
+    def __init__(self):
+        # 위치별 가중치 테이블
+        self.position_weights = [
+            [1000, -300, 100, 80, 80, 100, -300, 1000],  # 코너=1000, X스퀘어=-300
+            [-300, -500, -50, -20, -20, -50, -500, -300], # C스퀘어=-500
+            [100, -50, 50, 10, 10, 50, -50, 100],
+            [80, -20, 10, 5, 5, 10, -20, 80],
+            [80, -20, 10, 5, 5, 10, -20, 80],
+            [100, -50, 50, 10, 10, 50, -50, 100],
+            [-300, -500, -50, -20, -20, -50, -500, -300],
+            [1000, -300, 100, 80, 80, 100, -300, 1000]
+        ]
+        
+        # 방향벡터 (8방향)
+        self.directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+        
+        # 코너와 인접 위치 정의
+        self.corners = [(0,0), (0,7), (7,0), (7,7)]
+        self.x_squares = [(1,1), (1,6), (6,1), (6,6)]
+        self.c_squares = [(0,1), (1,0), (0,6), (1,7), (6,0), (7,1), (7,6), (6,7)]
+        self.edges = [(0,i) for i in range(8)] + [(7,i) for i in range(8)] + \
+                    [(i,0) for i in range(1,7)] + [(i,7) for i in range(1,7)]
+
     def evaluate_bitboard(self, bb: BitBoard, ai_color: int) -> int:
-        empty = 64 - BitBoard.popcount(bb.black | bb.white)
-        my = bb.black if ai_color == BLACK else bb.white
-        op = bb.white if ai_color == BLACK else bb.black
-
-        disc_diff = BitBoard.popcount(my) - BitBoard.popcount(op)
-
+        """종합적인 보드 평가"""
+        empty_count = 64 - BitBoard.popcount(bb.black | bb.white)
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        
+        # 게임 단계 결정
+        if empty_count > 50:
+            stage = "opening"
+        elif empty_count > 20:
+            stage = "midgame"
+        else:
+            stage = "endgame"
+        
+        score = 0
+        
+        # 1. 기본 위치 평가
+        score += self._evaluate_positions(my_mask, op_mask) * self._get_position_weight(stage)
+        
+        # 2. 이동성(Mobility) 평가 - 핵심 전략
+        score += self._evaluate_mobility(bb, ai_color) * self._get_mobility_weight(stage)
+        
+        # 3. 프론티어(Frontier) 평가 - 상대가 둘 수 있는 위치 최소화
+        score += self._evaluate_frontier(bb, ai_color) * self._get_frontier_weight(stage)
+        
+        # 4. 코너 안전성 평가
+        score += self._evaluate_corner_safety(bb, ai_color) * self._get_corner_weight(stage)
+        
+        # 5. 안정성(Stability) 평가 - 굳힘돌
+        score += self._evaluate_stability(bb, ai_color) * self._get_stability_weight(stage)
+        
+        # 6. 변(Edge) 컨트롤 평가
+        score += self._evaluate_edge_control(bb, ai_color) * self._get_edge_weight(stage)
+        
+        # 7. 패리티(홀짝) 평가 - 엔드게임에서 중요
+        if stage == "endgame":
+            score += self._evaluate_parity(empty_count, ai_color) * 100
+        
+        # 8. 디스크 개수 차이 (엔드게임에서만 중요)
+        if stage == "endgame":
+            disc_diff = BitBoard.popcount(my_mask) - BitBoard.popcount(op_mask)
+            score += disc_diff * 50
+        
+        return int(score)
+    
+    def _evaluate_positions(self, my_mask: int, op_mask: int) -> float:
+        """위치별 가중치 평가"""
+        score = 0
+        for i in range(8):
+            for j in range(8):
+                pos = 1 << ((i << 3) | j)
+                if my_mask & pos:
+                    score += self.position_weights[i][j]
+                elif op_mask & pos:
+                    score -= self.position_weights[i][j]
+        return score
+    
+    def _evaluate_mobility(self, bb: BitBoard, ai_color: int) -> float:
+        """이동성 평가 - 상대방 선택지 제한이 핵심"""
         my_moves = len(bb.get_valid_moves_bitboard(ai_color))
         op_moves = len(bb.get_valid_moves_bitboard(opponent(ai_color)))
-        mobility = 0.0
-        tot_moves = my_moves + op_moves
-        if tot_moves:
-            mobility = (my_moves - op_moves) / tot_moves
-
-        corners = 0
-        for (cx, cy) in ((0, 0), (0, 7), (7, 0), (7, 7)):
-            ci = (cx << 3) | cy
-            mask = 1 << ci
-            if my & mask:
-                corners += 1
-            elif op & mask:
-                corners -= 1
-
-        score = 0.0
-        score += corners * 1000
-        score += mobility * 200
-        score += disc_diff * 10
-        if empty > 50:
-            score *= 1.2  # early
-        elif empty <= 20:
-            score *= 0.8  # late (tempered)
-        return int(score)
+        
+        # 상대방 이동성을 제한하는 것이 더 중요
+        if my_moves + op_moves == 0:
+            return 0
+        
+        # 절대적 이동성과 상대적 이동성 모두 고려
+        mobility_diff = my_moves - op_moves
+        relative_mobility = mobility_diff / max(1, my_moves + op_moves)
+        
+        # 상대방 선택지가 적을수록 좋음 (강한 페널티)
+        if op_moves == 0 and my_moves > 0:
+            return 2000  # 상대방이 패스해야 하는 상황
+        elif op_moves <= 2:
+            return 1000 + mobility_diff * 100  # 상대방 선택지가 매우 제한적
+        
+        return mobility_diff * 80 + relative_mobility * 200
+    
+    def _evaluate_frontier(self, bb: BitBoard, ai_color: int) -> float:
+        """프론티어 평가 - 상대가 인접할 수 있는 빈칸 최소화"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        empty_mask = bb.get_empty_mask()
+        
+        my_frontier = self._count_frontier_discs(my_mask, empty_mask)
+        op_frontier = self._count_frontier_discs(op_mask, empty_mask)
+        
+        # 내 프론티어는 적을수록, 상대 프론티어는 많을수록 좋음
+        return (op_frontier - my_frontier) * 50
+    
+    def _count_frontier_discs(self, mask: int, empty_mask: int) -> int:
+        """특정 색깔의 프론티어 디스크 수 계산"""
+        frontier_count = 0
+        
+        for idx in BitBoard._iter_bits(mask):
+            x, y = divmod(idx, 8)
+            # 8방향 중 하나라도 빈칸과 인접하면 프론티어
+            for dx, dy in self.directions:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < 8 and 0 <= ny < 8:
+                    nidx = (nx << 3) | ny
+                    if empty_mask & (1 << nidx):
+                        frontier_count += 1
+                        break
+        
+        return frontier_count
+    
+    def _evaluate_corner_safety(self, bb: BitBoard, ai_color: int) -> float:
+        """코너 안전성 평가"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        
+        score = 0
+        for x, y in self.corners:
+            pos = 1 << ((x << 3) | y)
+            if my_mask & pos:
+                score += 1000  # 코너 확보
+                # 코너 주변 안정성도 보너스
+                score += self._evaluate_corner_stability(bb, (x, y), ai_color)
+            elif op_mask & pos:
+                score -= 1000
+        
+        # X 스퀘어와 C 스퀘어 위험도 평가
+        score += self._evaluate_dangerous_squares(bb, ai_color)
+        
+        return score
+    
+    def _evaluate_corner_stability(self, bb: BitBoard, corner: tuple, ai_color: int) -> float:
+        """코너에서 시작하는 안정성 평가"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        stable_score = 0
+        
+        x, y = corner
+        # 코너에서 변을 따라 연속된 내 돌들은 안정
+        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
+            if abs(dx) + abs(dy) != 1:
+                continue
+            
+            nx, ny = x + dx, y + dy
+            consecutive = 0
+            while 0 <= nx < 8 and 0 <= ny < 8:
+                pos = 1 << ((nx << 3) | ny)
+                if my_mask & pos:
+                    consecutive += 1
+                    nx += dx
+                    ny += dy
+                else:
+                    break
+            
+            stable_score += consecutive * 100
+        
+        return stable_score
+    
+    def _evaluate_dangerous_squares(self, bb: BitBoard, ai_color: int) -> float:
+        """X 스퀘어, C 스퀘어 위험도 평가"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        empty_mask = bb.get_empty_mask()
+        
+        score = 0
+        
+        # X 스퀘어 평가
+        for x, y in self.x_squares:
+            pos = 1 << ((x << 3) | y)
+            corner_x = 0 if x == 1 else 7
+            corner_y = 0 if y == 1 else 7
+            corner_pos = 1 << ((corner_x << 3) | corner_y)
+            
+            # 해당 코너가 비어있을 때만 X 스퀘어가 위험
+            if empty_mask & corner_pos:
+                if my_mask & pos:
+                    score -= 300  # 내가 X 스퀘어에 두면 위험
+                elif empty_mask & pos:
+                    # 상대방이 X 스퀘어에 둘 수 있는지 확인
+                    if self._can_move_to(bb, (x, y), opponent(ai_color)):
+                        score += 150  # 상대방이 X 스퀘어에 두게 만들면 유리
+        
+        # C 스퀘어 평가도 유사하게
+        for x, y in self.c_squares:
+            pos = 1 << ((x << 3) | y)
+            # C 스퀘어와 인접한 코너 찾기
+            corner_pos = self._get_adjacent_corner(x, y)
+            if corner_pos and empty_mask & corner_pos:
+                if my_mask & pos:
+                    score -= 200
+                elif empty_mask & pos and self._can_move_to(bb, (x, y), opponent(ai_color)):
+                    score += 100
+        
+        return score
+    
+    def _evaluate_stability(self, bb: BitBoard, ai_color: int) -> float:
+        """안정성 평가 - 뒤집힐 수 없는 돌들"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        
+        my_stable = self._count_stable_discs(my_mask, op_mask)
+        op_stable = self._count_stable_discs(op_mask, my_mask)
+        
+        return (my_stable - op_stable) * 100
+    
+    def _count_stable_discs(self, my_mask: int, op_mask: int) -> int:
+        """안정한 돌의 개수 계산"""
+        stable_count = 0
+        occupied = my_mask | op_mask
+        
+        for idx in BitBoard._iter_bits(my_mask):
+            x, y = divmod(idx, 8)
+            if self._is_stable_disc(x, y, my_mask, occupied):
+                stable_count += 1
+        
+        return stable_count
+    
+    def _is_stable_disc(self, x: int, y: int, my_mask: int, occupied: int) -> bool:
+        """특정 돌이 안정한지 확인"""
+        # 코너는 항상 안정
+        if (x, y) in self.corners:
+            return True
+        
+        # 변에 있고 양쪽이 안정하면 안정
+        if (x, y) in self.edges:
+            return self._is_edge_stable(x, y, my_mask, occupied)
+        
+        # 8방향 모두에서 안정한지 확인 (단순화된 버전)
+        stable_directions = 0
+        for dx, dy in self.directions:
+            if self._is_direction_stable(x, y, dx, dy, my_mask, occupied):
+                stable_directions += 1
+        
+        return stable_directions >= 6  # 대부분 방향에서 안정하면 안정한 것으로 간주
+    
+    def _evaluate_edge_control(self, bb: BitBoard, ai_color: int) -> float:
+        """변 컨트롤 평가"""
+        my_mask = bb.black if ai_color == BLACK else bb.white
+        op_mask = bb.white if ai_color == BLACK else bb.black
+        
+        score = 0
+        # 각 변별로 컨트롤 평가
+        edges_data = [
+            [(0, i) for i in range(8)],  # 상단
+            [(7, i) for i in range(8)],  # 하단
+            [(i, 0) for i in range(8)],  # 좌측
+            [(i, 7) for i in range(8)]   # 우측
+        ]
+        
+        for edge in edges_data:
+            my_edge_count = 0
+            op_edge_count = 0
+            
+            for x, y in edge:
+                pos = 1 << ((x << 3) | y)
+                if my_mask & pos:
+                    my_edge_count += 1
+                elif op_mask & pos:
+                    op_edge_count += 1
+            
+            # 변을 많이 컨트롤할수록 좋음
+            score += (my_edge_count - op_edge_count) * 25
+        
+        return score
+    
+    def _evaluate_parity(self, empty_count: int, ai_color: int) -> float:
+        """패리티 평가 - 마지막에 둘 수 있는 플레이어가 유리"""
+        # 홀수면 흑이 마지막, 짝수면 백이 마지막
+        last_player = BLACK if empty_count % 2 == 1 else WHITE
+        return 200 if ai_color == last_player else -200
+    
+    # 유틸리티 메서드들
+    def _can_move_to(self, bb: BitBoard, pos: tuple, color: int) -> bool:
+        """특정 위치에 특정 색이 둘 수 있는지 확인"""
+        valid_moves = bb.get_valid_moves_bitboard(color)
+        return pos in valid_moves
+    
+    def _get_adjacent_corner(self, x: int, y: int) -> int:
+        """C 스퀘어와 인접한 코너의 비트마스크 반환"""
+        corner_map = {
+            (0, 1): (0, 0), (1, 0): (0, 0),  # 좌상단 코너
+            (0, 6): (0, 7), (1, 7): (0, 7),  # 우상단 코너  
+            (6, 0): (7, 0), (7, 1): (7, 0),  # 좌하단 코너
+            (6, 7): (7, 7), (7, 6): (7, 7)   # 우하단 코너
+        }
+        
+        if (x, y) in corner_map:
+            cx, cy = corner_map[(x, y)]
+            return 1 << ((cx << 3) | cy)
+        return 0
+    
+    def _is_edge_stable(self, x: int, y: int, my_mask: int, occupied: int) -> bool:
+        """변의 돌이 안정한지 확인 (단순화된 버전)"""
+        # 실제로는 더 복잡한 로직이 필요하지만 여기서는 단순화
+        return True  # 변의 돌은 일단 안정한 것으로 간주
+    
+    def _is_direction_stable(self, x: int, y: int, dx: int, dy: int, my_mask: int, occupied: int) -> bool:
+        """특정 방향에서 안정한지 확인"""
+        # 한 방향으로 쭉 가면서 내 돌이거나 경계에 닿으면 안정
+        nx, ny = x + dx, y + dy
+        while 0 <= nx < 8 and 0 <= ny < 8:
+            pos = 1 << ((nx << 3) | ny)
+            if not (occupied & pos):  # 빈칸이면 불안정
+                return False
+            if not (my_mask & pos):  # 상대 돌이면 불안정
+                return False
+            nx += dx
+            ny += dy
+        return True
+    
+    # 게임 단계별 가중치 조정
+    def _get_position_weight(self, stage: str) -> float:
+        weights = {"opening": 0.8, "midgame": 1.2, "endgame": 0.6}
+        return weights.get(stage, 1.0)
+    
+    def _get_mobility_weight(self, stage: str) -> float:
+        weights = {"opening": 1.5, "midgame": 2.0, "endgame": 0.8}
+        return weights.get(stage, 1.0)
+    
+    def _get_frontier_weight(self, stage: str) -> float:
+        weights = {"opening": 2.0, "midgame": 1.8, "endgame": 0.5}
+        return weights.get(stage, 1.0)
+    
+    def _get_corner_weight(self, stage: str) -> float:
+        weights = {"opening": 1.0, "midgame": 1.5, "endgame": 2.0}
+        return weights.get(stage, 1.0)
+    
+    def _get_stability_weight(self, stage: str) -> float:
+        weights = {"opening": 0.5, "midgame": 1.0, "endgame": 1.5}
+        return weights.get(stage, 1.0)
+    
+    def _get_edge_weight(self, stage: str) -> float:
+        weights = {"opening": 0.8, "midgame": 1.2, "endgame": 1.0}
+        return weights.get(stage, 1.0)
 
 
 class SearchEngine:
